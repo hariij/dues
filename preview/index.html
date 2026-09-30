@@ -955,6 +955,12 @@ dialog::backdrop{background:rgba(20,20,20,.55)}
 .floaty.good{background:var(--good);color:#000}
 @keyframes floatUp{0%{transform:translate(-50%,30px) scale(.8);opacity:0}20%{transform:translate(-50%,0) scale(1.05);opacity:1}75%{opacity:1}100%{transform:translate(-50%,-50px) scale(1);opacity:0}}
 .verdict{transition:background-color .5s}
+
+/* loading bar */
+.ld{height:18px;border:var(--bw) solid var(--edge);border-radius:4px;background:repeating-linear-gradient(135deg,var(--surface) 0 6px,var(--grid) 6px 9px);overflow:hidden;margin:6px 0 2px}
+.ld i{display:block;height:100%;background:var(--mark);border-right:var(--bw) solid var(--edge);transition:width .5s cubic-bezier(.2,.8,.2,1)}
+.motion .ld i{background-image:repeating-linear-gradient(135deg,transparent 0 8px,rgba(0,0,0,.12) 8px 14px);background-size:40px 40px;animation:ldMove .8s linear infinite}
+@keyframes ldMove{to{background-position:40px 0}}
 </style>
 </head>
 <body>
@@ -1215,7 +1221,7 @@ function activityHTML(){
 }
 
 rebase();
-const APP_VER='2026.10.01 (new look 4)';
+const APP_VER='2026.10.01 (new look 6)';
 /* ============ cloud sync (Firebase free plan, optional) ============ */
 const FB='https://www.gstatic.com/firebasejs/10.12.2/';
 const CLOUDKEY='duesPlanner.cloud',WHOKEY='duesPlanner.who';
@@ -1277,7 +1283,7 @@ function syncBadge(){
 addEventListener('online',syncBadge);addEventListener('offline',syncBadge);
 function stopListen(){Cloud.unsub.forEach(u=>{try{u()}catch(e){}});Cloud.unsub=[];Cloud.ready=false}
 function cloudListen(){
-  stopListen();Cloud.cache={};Cloud.last={};
+  stopListen();Cloud.cache={};Cloud.last={};Cloud.fresh=false;
   const {collection,doc,onSnapshot}=Cloud.api,cols=['items','accounts','incoming','months','log'];
   let got=0;const need=cols.length+1,seen=new Set();
   const settle=(key,changed)=>{
@@ -1292,24 +1298,34 @@ function cloudListen(){
     let ch=false;snap.docChanges().forEach(d=>{const p=`${col}/${d.doc.id}`;ch=(d.type==='removed'?put(p,null):put(p,d.doc.data()))||ch});settle(col,ch)},fail)));
   Cloud.unsub.push(onSnapshot(doc(Cloud.db,`${SPACE}/meta/settings`),{includeMetadataChanges:true},snap=>{
     if(!Cloud.ready&&!snap.exists()&&snap.metadata&&snap.metadata.fromCache)return; // new device: wait for the server before deciding the cloud is empty
+    if(snap.metadata&&snap.metadata.fromCache===false&&!Cloud.fresh){Cloud.fresh=true;if(Cloud.ready&&!Boot.opened)setTimeout(()=>bootOpen('fresh'),150)} // the server has answered
     const ch=put('meta/settings',snap.exists()?snap.data():null);settle('settings',ch)},fail));
 }
 function firstCloudLoad(){
   Cloud.ready=true;syncBadge();
-  if(!Cloud.cache['meta/settings'])return showGate('first');
-  const same=!gated()&&stableJ(S)===stableJ(migrate(joinState(Cloud.cache)));
-  S=migrate(joinState(Cloud.cache));rebase();store.set(KEY,JSON.stringify(S));
-  if(same){syncBadge();cloudQueue();return} // the copy on screen is already current: no redraw, so the opening animation plays undisturbed
-  openApp();cloudQueue();
+  if(!Cloud.cache['meta/settings']){clearTimeout(Boot.fallback);clearTimeout(Boot.slow);Boot.opened=true;return showGate('first')}
+  if(Boot.opened){ // the saved copy is already on screen: redraw only if the cloud has something newer
+    const same=stableJ(S)===stableJ(migrate(joinState(Cloud.cache)));
+    S=migrate(joinState(Cloud.cache));rebase();store.set(KEY,JSON.stringify(S));
+    if(!same&&!gated())render();cloudQueue();return}
+  ldStep(75,'Checking for changes');
+  if(Cloud.fresh)setTimeout(()=>bootOpen('fresh'),150);
 }
 const gated=()=>document.body.classList.contains('gated');
 function stableJ(o){const f=x=>Array.isArray(x)?x.map(f):x&&typeof x==='object'?Object.keys(x).filter(k=>k!=='_o').sort().reduce((a,k)=>{a[k]=f(x[k]);return a},{}):x;return JSON.stringify(f(o))}
 function openApp(){document.body.classList.remove('gated');$('#gate').innerHTML='';VM=defMonth();render();syncBadge()}
+const Boot={opened:false,fallback:null,slow:null,pct:8,txt:'Starting'};
+function ldStep(pct,txt){Boot.pct=Math.max(Boot.pct,pct);if(txt)Boot.txt=txt;const b=$('#ldBar'),t=$('#ldTxt');if(b){b.style.width=Boot.pct+'%';b.parentNode.setAttribute('aria-valuenow',Boot.pct)}if(t&&txt)t.textContent=txt}
+function bootOpen(why){ // show the app once: after the cloud has confirmed your data, or the saved copy if that takes too long
+  if(Boot.opened)return;Boot.opened=true;clearTimeout(Boot.fallback);clearTimeout(Boot.slow);
+  if(Cloud.ready&&Cloud.cache['meta/settings']){if(why==='fresh')ldStep(100,'Up to date');S=migrate(joinState(Cloud.cache));rebase();store.set(KEY,JSON.stringify(S))}
+  openApp();cloudQueue();
+}
 function showGate(kind,info){
   document.body.classList.add('gated');const g=$('#gate');
   const email=Cloud.user?esc(Cloud.user.email):'';
   const box=(h,b)=>`<div class="gate-card"><div class="brand" style="font-size:20px;margin-bottom:6px"><span class="logo" aria-hidden="true">₹</span>Dues Planner</div><h2>${h}</h2>${b}</div>`;
-  if(kind==='loading')g.innerHTML=box('Opening…','<p class="muted">Connecting to your data.</p>');
+  if(kind==='loading')g.innerHTML=box('Syncing your dues',`<div class="ld" role="progressbar" aria-label="Loading" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Boot.pct}"><i id="ldBar" style="width:${Boot.pct}%"></i></div><p class="muted" id="ldTxt">${Boot.txt}</p>`);
   else if(kind==='signin')g.innerHTML=box('Sign in to see your dues',`<p class="muted">Only allowed Google accounts can open this data.</p><button class="btn primary wide" data-act="signIn">Sign in with Google</button>${Cloud.err?`<p class="note" style="color:var(--crit)">${esc(Cloud.err)}</p>`:''}`);
   else if(kind==='denied')g.innerHTML=box('This account has no access',`<p class="muted">${email} is not allowed to open this data. Sign in with the owner account, or ask the owner to add you.</p><button class="btn wide" data-act="signOut">Sign out</button>`);
   else if(kind==='first'){
@@ -1336,8 +1352,10 @@ async function cloudBoot(){
     Au.onAuthStateChanged(Cloud.auth,u=>{
       Cloud.user=u;syncBadge();
       if(!u){stopListen();showGate('signin');return}
-      if(store.get(WHOKEY)===u.email&&(S.items.length||S.accounts.length))openApp(); // show the copy on this device while syncing
-      else showGate('loading');
+      const hasCopy=store.get(WHOKEY)===u.email&&(S.items.length||S.accounts.length);
+      if(!Boot.opened){showGate('loading');ldStep(35,'Loading your dues');
+        if(hasCopy)Boot.fallback=setTimeout(()=>bootOpen('saved'),navigator.onLine?3000:0); // slow or offline: show the copy on this device, it syncs in the background
+        else Boot.slow=setTimeout(()=>ldStep(60,'Still connecting. Check your internet connection.'),8000)}
       store.set(WHOKEY,u.email);
       cloudListen();
     });
@@ -1604,10 +1622,7 @@ function render(){
   $('[data-act=mnext]').disabled=VM>=addMonths(CUR,24);
   const {r,p}=route();
   $$('#nav a').forEach(a=>{if(a.dataset.r===r||(r==='dues'&&a.dataset.r==='pay'))a.setAttribute('aria-current','page');else a.removeAttribute('aria-current')});
-  try{ // animate when a screen is opened; a redraw within a second of that (like the cloud copy arriving) restarts it once, later redraws do not
-    const now=performance.now(),opened=r!==Mo.route,cont=!opened&&Mo.animR===r&&now-Mo.animAt<1000;
-    Mo.anim=MOTION&&(opened||cont);if(MOTION&&opened){Mo.animAt=now;Mo.animR=r}
-    view.classList.toggle('noanim',!Mo.anim)}catch(e){}
+  try{Mo.anim=MOTION&&r!==Mo.route;view.classList.toggle('noanim',!Mo.anim)}catch(e){} // animate once when a screen is opened; redraws stay still
   ({home:rHome,dues:rPay,pay:rPay,money:rMoney,plan:rPlan,manage:rManage}[r]||rHome)(p);
   if(typeof afterRender==='function')afterRender(r);
 }
@@ -2954,7 +2969,7 @@ function countTo(el,from,to,ms){
   if(!MOTION||!el||from===to)return;
   const pre=el.textContent.match(/^[^\d-]*/)[0],t0=performance.now(),dec=Math.abs(to%1)>0;
   const f=v=>pre+Math.round(v).toLocaleString('en-IN');
-  const step=t=>{const k=Math.min(1,(t-t0)/ms),e=1-Math.pow(1-k,3);el.textContent=f(from+(to-from)*e);if(k<1)requestAnimationFrame(step);else el.textContent=pre+(dec?to.toLocaleString('en-IN',{maximumFractionDigits:2}):Math.round(to).toLocaleString('en-IN'))};
+  const step=t=>{const k=Math.max(0,Math.min(1,(t-t0)/ms)),e=1-Math.pow(1-k,3);el.textContent=f(from+(to-from)*e);if(k<1)requestAnimationFrame(step);else el.textContent=pre+(dec?to.toLocaleString('en-IN',{maximumFractionDigits:2}):Math.round(to).toLocaleString('en-IN'))};
   el.textContent=f(from);requestAnimationFrame(step);
 }
 const numOf=t=>{const m=(t||'').replace(/,/g,'').match(/-?\d+(\.\d+)?/);return m?+m[0]:null};
@@ -2966,8 +2981,7 @@ function afterRender(r){
   // status block: count up the first time, roll + colour morph when it changes
   const v=$('.verdict .vbig'),vb=$('.verdict');
   if(v&&vb){const val=numOf(v.textContent),bg=getComputedStyle(vb).backgroundColor;
-    const cont=Mo.countAt&&performance.now()-Mo.countAt<1000;
-    if(Mo.anim&&(!Mo.countAt||cont)){if(!Mo.countAt)Mo.countAt=performance.now();countTo(v,0,val,750);vb.classList.add('fuse')}
+    if(Mo.anim&&!Mo.countAt){Mo.countAt=1;countTo(v,0,val,750);vb.classList.add('fuse')}
     else if(Mo.anim)vb.classList.add('fuse');
     else if(Mo.vVal!=null&&val!==Mo.vVal){countTo(v,Mo.vVal,val,600);if(MOTION&&Mo.vBg&&Mo.vBg!==bg){vb.style.transition='none';vb.style.backgroundColor=Mo.vBg;void vb.offsetWidth;vb.style.transition='background-color .5s';vb.style.backgroundColor='';setTimeout(()=>{vb.style.transition=''},600)}}
     Mo.vVal=val;Mo.vBg=bg}
