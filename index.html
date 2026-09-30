@@ -601,6 +601,18 @@ function migrate(o){
   }
   if(o&&o.v===5){if(!o.bundle)o.bundle={from:28,to:27};else if(o.bundle.from===28)o.bundle.to=27;o.v=6}
   if(o){if(!o.bundle)o.bundle={from:28,to:27};if(!o.planFrom)o.planFrom=15}
+  if(o&&o.items&&o.incoming)o.incoming.forEach(f=>{ // card cash: one card, not a separate repayment entry
+    if(f.type!=='cardcash'||!f.link)return;
+    const li=o.items.find(i=>i.id===f.link),card=o.items.find(i=>i.id===f.card),repay=f.repay||(li&&li.rule&&li.rule.date);
+    if(!card||!repay)return;
+    const r=card.rule||{};let m=repay.slice(0,7);if(r.type==='day'&&r.prev&&+repay.slice(8)>=Math.min(r.day||1,daysIn(m)))m=addMonths(m,1);
+    o.months=o.months||{};const mo=o.months[m]=o.months[m]||{},c=mo[card.id]=mo[card.id]||{};
+    c.cash=r2((+f.amount||0)*(1+(+f.fee||0)/100));c.cashInc=f.id;if(card.mode==='used'&&!c.on){c.on=true;c.cashOn=true}
+    const mm=r.prev?addMonths(m,-1):m,rd=r.type==='day'?`${mm}-${pad(Math.min(r.day||1,daysIn(mm)))}`:r.type==='last'?lastDay(m):null;
+    if(!c.due&&rd!==repay){c.due=repay;c.cashDue=true}
+    if(li){Object.keys(o.months).forEach(k=>{const lo=o.months[k][li.id];if(lo){if(lo.pays&&lo.pays.length)c.pays=(c.pays||[]).concat(lo.pays);delete o.months[k][li.id]}});o.items=o.items.filter(i=>i!==li)}
+    f.cashAt={m,card:card.id};delete f.link;
+  });
   if(o&&o.items)o.items.forEach(it=>{if(it.budget===undefined&&it.freq&&(it.rule||{}).type==='none'&&/provision|grocer|fruit|vegetable|veggie/i.test(it.name||''))it.budget=true});
   return o;
 }
@@ -667,6 +679,7 @@ function describe(ch){
       add.forEach(p=>P.push(bu?`Spent ${money(p.amount)} on ${nm}${p.acc&&accN(p.acc)?' from '+accN(p.acc):''}`:`Paid ${nm} ${money(p.amount)}${p.acc&&accN(p.acc)?' from '+accN(p.acc):''}`));
       if(!!a0.closed!==!!b0.closed)O.push(a0.closed?`Closed ${nm} budget for ${Mn}`:`Reopened ${nm} budget for ${Mn}`);
       rem.forEach(p=>P.push(`Removed ${nm} payment of ${money(p.amount)}`));
+      if((+a0.cash||0)!==(+b0.cash||0))O.push(a0.cash?`${nm} ${Mn} bill includes card cash ${money(a0.cash)}`:`Card cash taken off ${nm} ${Mn} bill`);
       if(!!a0.skip!==!!b0.skip)O.push(a0.skip?`Skipped ${nm} for ${Mn}`:`Included ${nm} in ${Mn} again`);
       if(!add.length&&!rem.length){
         if(a0.amount!=null&&a0.amount!==b0.amount)O.push(a0.confirmed&&!b0.confirmed?`Entered ${nm} ${Mn} bill: ${money(a0.amount)}`:`${nm} ${Mn} bill: ${b0.amount!=null?money(b0.amount)+' → ':''}${money(a0.amount)}`);
@@ -743,7 +756,7 @@ function activityHTML(){
 }
 
 rebase();
-const APP_VER='2026.10.01 (budgets)';
+const APP_VER='2026.10.01 (one card)';
 /* ============ cloud sync (Firebase free plan, optional) ============ */
 const FB='https://www.gstatic.com/firebasejs/10.12.2/';
 const CLOUDKEY='duesPlanner.cloud',WHOKEY='duesPlanner.who';
@@ -824,7 +837,7 @@ function cloudListen(){
 function firstCloudLoad(){
   Cloud.ready=true;syncBadge();
   if(!Cloud.cache['meta/settings'])return showGate('first');
-  S=migrate(joinState(Cloud.cache));rebase();store.set(KEY,JSON.stringify(S));openApp();
+  S=migrate(joinState(Cloud.cache));rebase();store.set(KEY,JSON.stringify(S));openApp();cloudQueue();
 }
 const gated=()=>document.body.classList.contains('gated');
 function openApp(){document.body.classList.remove('gated');$('#gate').innerHTML='';VM=defMonth();render();syncBadge()}
@@ -930,7 +943,7 @@ function ruleDate(it,m){
 }
 function inst(it,m){
   const o=ov(m,it.id)||{},k=kindOf(it);
-  const amount=o.amount!=null?o.amount:(it.amount||0);
+  const cash=+o.cash||0,usage=o.amount!=null?o.amount:(it.amount||0),amount=r2(usage+cash);
   const pays=o.pays||[];
   const paid=sum(pays,p=>p.amount);
   const rem=Math.max(0,r2(amount-paid));
@@ -939,8 +952,9 @@ function inst(it,m){
     const done=m<CUR||!!o.closed,rb=done?0:Math.max(0,r2(amount-paid));
     return{it,m,k,o,amount:done?paid:Math.max(amount,paid),budAmt:amount,paid,rem:rb,pays,due:null,skip:!!o.skip,confirmed:true,bud:true,closed:done,over:Math.max(0,r2(paid-amount)),status:rb<=0?'paid':paid>0?'partial':'open'};
   }
-  return{it,m,k,o,amount,paid,rem,pays,due,skip:!!o.skip,confirmed:k==='loan'||k==='once'||!!o.confirmed,status:rem<=0?'paid':paid>0?'partial':'open'};
+  return{it,m,k,o,amount,paid,rem,pays,due,cash,usage,skip:!!o.skip,confirmed:k==='loan'||k==='once'||!!o.confirmed,status:rem<=0?'paid':paid>0?'partial':'open'};
 }
+const setTotal=(o,t)=>{o.amount=r2(Math.max(0,t-(+o.cash||0)))}; // a statement total includes any card cash; keep only the spending part
 const isBud=it=>!!(it&&it.budget&&kindOf(it)==='bill');
 const monthAll=m=>S.items.filter(it=>occursIn(it,m)).map(it=>inst(it,m));
 const monthList=m=>monthAll(m).filter(x=>!x.skip);
@@ -1022,7 +1036,8 @@ function timeline(untilD,use){
   for(let m=S.startMonth;m<=addMonths(monthOf(untilD),1);m=addMonths(m,1)){
     monthList(m).forEach(x=>{
       if(x.rem<=0)return;
-      if(x.it.link){const lf=inc(x.it.link);if(lf&&!lf.received&&!use({f:lf,key:lf.id,d:lf.date,amt:+lf.amount||0}))return} // no card cash, no repayment
+      if(x.cash&&x.o.cashInc){const lf=inc(x.o.cashInc);if(lf&&!lf.received&&!use({f:lf,key:lf.id,d:lf.date,amt:+lf.amount||0})){ // no card cash, no repayment
+        const rr=Math.max(0,r2(x.rem-x.cash));if(rr<=0)return;x=Object.assign({},x,{rem:rr})}}
       if(x.due){ev.push({d:x.due<TODAY?TODAY:x.due,a:-x.rem,lab:x.it.name,x,late:x.due<TODAY});return}
       let pts=[1,8,15,22].map(d=>`${m}-${pad(d)}`).filter(d=>d>=TODAY);
       if(x.bud&&TODAY>=`${m}-01`){pts=[];for(let d=TODAY;d<=lastDay(m);d=addDays(d,7))pts.push(d)} // what is left of a budget, spread week by week from today
@@ -1140,6 +1155,7 @@ function rowHTML(x,opt={}){
   if(x.status==='partial')sub.push(`${money(x.paid)} paid of ${money(x.amount)}`);
   const fl=flagOf(x);if(fl)sub.push(fl);
   if(!x.confirmed&&x.rem>0)sub.push('<span class="est">Estimate</span>');
+  if(x.cash)sub.push(`includes card cash ${money(x.cash)}`);
   if(opt.meta)sub.push(opt.meta);
   if(opt.showMonth&&x.m!==VM&&x.m<CUR)sub.push(`from ${fmS(x.m)}`);
   const amt=x.status==='paid'?`<span class="okmark">✓</span> ${money(x.amount)}`:money(x.rem);
@@ -1229,7 +1245,7 @@ function dayLabel(d){
 function trow(x){
   if(x.bud){const it=x.it,c=catOf(it.cat);return `<div class="trow bud" data-act="open" data-id="${it.id}" data-m="${x.m}" role="button" tabindex="0"><span class="sw" style="--c:${col(c)}" title="${esc(c.name)}"></span><span class="tn">${esc(it.name)}<small>${budTxt(x)}</small>${budMeter(x)}</span><b class="amt">${budAmt(x)}</b>${!x.closed?`<button class="btn sm" data-act="spend" data-id="${it.id}" data-m="${x.m}">Spent</button>`:'<span></span>'}</div>`}
   const it=x.it,c=catOf(it.cat);
-  const tags=(it.owner&&it.owner!=='Me'?` <span class="tag">${esc(it.owner)}</span>`:'')+(!x.confirmed?' <span class="est">Estimate</span>':'')+(x.status==='partial'?` <span class="muted small">${money(x.paid)} paid</span>`:'');
+  const tags=(it.owner&&it.owner!=='Me'?` <span class="tag">${esc(it.owner)}</span>`:'')+(x.cash?` <small>includes card cash ${money(x.cash)}</small>`:'')+(!x.confirmed?' <span class="est">Estimate</span>':'')+(x.status==='partial'?` <span class="muted small">${money(x.paid)} paid</span>`:'');
   return `<div class="trow" data-act="open" data-id="${it.id}" data-m="${x.m}" role="button" tabindex="0"><span class="sw" style="--c:${col(c)}" title="${esc(c.name)}"></span><span class="tn">${esc(it.name)}${tags}</span><b class="amt">${money(x.rem)}</b><button class="btn sm primary" data-act="pay" data-id="${it.id}" data-m="${x.m}">Pay</button></div>`;
 }
 function todoList(ctx){
@@ -1680,7 +1696,7 @@ function cardBill(id){
    `<p class="muted" style="margin-top:0">Enter the statement amount you need to pay.</p>
     <div class="g2">${fld('Bill amount',money$('amount',o.on?o.amount:'',1))}${fld('Pay by',`<input type="date" name="due" value="${due||''}" required>`)}</div>`,
    `<button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save bill</button>`,
-   fdata=>{const due=fdata.get('due');const m=monthOf(due);const o=ov(m,id,true);o.on=true;o.amount=num(fdata.get('amount'));o.confirmed=true;
+   fdata=>{const due=fdata.get('due');const m=monthOf(due);const o=ov(m,id,true);o.on=true;setTotal(o,num(fdata.get('amount')));o.confirmed=true;
      if(due!==ruleDate(it,m))o.due=due;else delete o.due;if(m!==VM)VM=m});
 }
 
@@ -1779,6 +1795,7 @@ function openInst(id,m){
   if(x.rem>0)b+=`<button type="button" class="btn primary wide" data-act="pay" data-id="${id}" data-m="${m}">Pay</button>`;
   if(x.skip)b+=`<p class="hint">Skipped for ${fmS(m)}. <button type="button" class="lnk" data-act="unskip" data-id="${id}" data-m="${m}">Include it again</button></p>`;
   b+=`<h4>${fmL(m)} only</h4><div class="g2">${fld(k==='loan'?'EMI this month':'Amount this month',money$('amount',x.amount,1))}${fld('Pay by',`<input type="date" name="due" value="${x.due||''}">`)}</div>`;
+  if(x.cash)b+=`<p class="hint">This bill includes the card cash repayment of ${money(x.cash)}. Type the full statement amount; your spending on the card is the rest (${money(x.usage)} now).</p>`;
   if(k==='bill'||k==='card')b+=`<label class="chk"><input type="checkbox" name="actual" ${x.confirmed?'checked':''}> This is the actual bill, not an estimate</label>`;
   if(k==='bill'||(k==='card'&&it.mode!=='used'))b+=`<label class="chk"><input type="checkbox" name="usual"> Use this amount for later months too</label>`;
   b+=`<div style="margin-top:12px"><button class="btn">Save changes</button></div>`;
@@ -1791,7 +1808,8 @@ function openInst(id,m){
   b+=`<button type="button" class="btn sm danger" data-act="delItem" data-id="${id}">Delete</button></div>`;
   const f=openDlg(esc(it.name)+owner,b,'',fdata=>{
     const o=ov(m,id,true),amt=num(fdata.get('amount')),due=fdata.get('due');
-    if(fdata.get('usual')){freezePast(it,m);it.amount=amt;delete o.amount}
+    if(o.cash){if(fdata.get('usual')){freezePast(it,m);it.amount=r2(Math.max(0,amt-o.cash));delete o.amount}else setTotal(o,amt)}
+    else if(fdata.get('usual')){freezePast(it,m);it.amount=amt;delete o.amount}
     else if(amt!==(it.amount||0)||o.amount!=null)o.amount=amt;
     if(k==='bill'||k==='card')o.confirmed=!!fdata.get('actual');
     if(due&&due!==ruleDate(it,m))o.due=due;else delete o.due;
@@ -1858,7 +1876,7 @@ function openPay(id,m){
     const o=ov(m,id,true);o.pays=o.pays||[];const acc=fdata.get('acc')||'';
     o.pays.push({id:uid(),date:fdata.get('date'),amount:amt,acc,note:(fdata.get('note')||'').trim(),at:Date.now()});
     if(acc){const a=acct(acc);if(a)a.balance=r2((+a.balance||0)-amt)}
-    if(k!=='loan'&&fdata.get('settle')){o.amount=r2(x.paid+amt);o.confirmed=true}
+    if(k!=='loan'&&fdata.get('settle')){setTotal(o,x.paid+amt);o.confirmed=true}
     if(it.mode==='used')o.on=true;
     setTimeout(()=>toast(`Saved: ${money(amt)} paid for ${esc(it.name)}`,()=>restore(j0)),0);
   });
@@ -1906,17 +1924,13 @@ function incForm(id,copy){
       o.sure=!!fdata.get('count');
       if(o.type==='cardcash'){
         o.card=fdata.get('card');o.fee=num(fdata.get('fee'));o.repay=fdata.get('repay');
-        const card=item(o.card);let li=o.link&&item(o.link);
-        if(!li){li={id:uid(),freq:0};S.items.push(li);o.link=li.id;li.link=o.id}
-        li.cat=card?card.cat:(S.cats.find(c=>c.kind==='card')||{}).id;li.owner=card?card.owner:'Me';
-        li.name=`${card?card.name:'Card'} cash repayment`;li.amount=r2(o.amount*(1+o.fee/100));
-        li.rule={type:'date',date:o.repay};li.from=monthOf(o.repay);li.until=li.from;
-      }else if(o.link){if(item(o.link))delItemNow(o.link);o.link=null}
+        cashSet(o);
+      }else cashClear(o);
       if(isNew)S.incoming.push(o);
     });
   wireShow(f);
   const upd=()=>{const a=num(f.amount.value),fe=num(f.fee.value),c=item(f.card.value),d=f.repay.value;
-    $('#ccTxt').textContent=a?`You get ${money(a)} on the expected date. ${c?c.name:'The card'} will show ${money(a*(1+fe/100))} to repay${d?` by ${fdw(d)}`:''}. The repayment is added to Credit cards automatically.`:'Enter the amount to see the repayment.'};
+    $('#ccTxt').textContent=a?`You get ${money(a)} on the expected date. ${c?c.name:'The card'} will show ${money(a*(1+fe/100))} to repay${d?` by ${fdw(d)}`:''}. It is added to that card's bill for that month, so the card stays one entry.`:'Enter the amount to see the repayment.'};
   f.addEventListener('input',upd);f.addEventListener('change',upd);upd();
 }
 function openBal(){
@@ -1925,6 +1939,25 @@ function openBal(){
    `<button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button>`,
    fdata=>{let n=0,ch=0;const ids=[];S.accounts.forEach(a=>{const v=fdata.get('b_'+a.id);if(v==null||String(v).trim()==='')return;const nv=num(v);if(nv!==(+a.balance||0)){n++;ch+=nv-(+a.balance||0);ids.push(a.id)}a.balance=nv;markChecked(a)});setTimeout(()=>reconcile(ids,ch),60);
      setTimeout(()=>toast(n?`Balances updated`:`Balances confirmed for today`,()=>restore(j0)),0)});
+}
+function cashPlace(f){
+  const card=item(f.card);if(!card||!f.repay)return null;const r=card.rule||{};
+  let m=monthOf(f.repay);if(r.type==='day'&&r.prev&&+f.repay.slice(8)>=Math.min(r.day||1,daysIn(m)))m=addMonths(m,1);
+  return{m,card:card.id};
+}
+function cashClear(f){
+  const p=f.cashAt;if(!p)return;const o=ov(p.m,p.card);
+  if(o&&o.cashInc===f.id){delete o.cash;delete o.cashInc;if(o.cashDue){delete o.due;delete o.cashDue}
+    if(o.cashOn){if(!o.confirmed&&!(o.pays&&o.pays.length))delete o.on;delete o.cashOn}
+    if(!Object.keys(o).length)delete S.months[p.m][p.card]}
+  delete f.cashAt;
+}
+function cashSet(f){
+  cashClear(f);const p=cashPlace(f);if(!p)return;const it=item(p.card),o=ov(p.m,p.card,true);
+  o.cash=r2((+f.amount||0)*(1+(+f.fee||0)/100));o.cashInc=f.id;
+  if(it.mode==='used'&&!o.on){o.on=true;o.cashOn=true}
+  if(!o.due&&ruleDate(it,p.m)!==f.repay){o.due=f.repay;o.cashDue=true}
+  f.cashAt=p;
 }
 function openRecv(id,m){
   const f=inc(id),j0=snap(),exp=f.type==='monthly'?`${m}-${pad(Math.min(f.day||1,daysIn(m)))}`:(f.date||TODAY);
@@ -2009,13 +2042,13 @@ function stmtBody(L){
    L.map((l,i)=>{const own=l.it.owner&&l.it.owner!=='Me'?` <span class="tag">${esc(l.it.owner)}</span>`:'';
      const cur=l.x?(l.x.confirmed?l.x.amount:''):'';
      const ph=l.used?(l.x?'':'not used'):`estimate ${short(l.x.amount)}`;
-     return `<div class="stm-r"><div><b>${esc(l.it.name)}</b>${own}<small>due ${fdw(l.due)}${l.x&&!l.x.confirmed?` · estimate ${money(l.x.amount)}`:''}${l.x&&l.x.confirmed?' · entered':''}</small></div>
+     return `<div class="stm-r"><div><b>${esc(l.it.name)}</b>${own}<small>due ${fdw(l.due)}${l.x&&!l.x.confirmed?` · estimate ${money(l.x.amount)}`:''}${l.x&&l.x.confirmed?' · entered':''}${l.x&&l.x.cash?` · includes card cash ${money(l.x.cash)}, type the full statement`:''}</small></div>
        <input type="number" inputmode="decimal" step="0.01" min="0" name="st_${i}" value="${cur}" placeholder="${ph}" aria-label="${esc(l.it.name)} statement amount"></div>`}).join('');
 }
 function stmtSave(L,fdata){
   let n=0;L.forEach((l,i)=>{const v=String(fdata.get('st_'+i)||'').trim();if(v==='')return;const a=num(v);
-    const o=ov(l.m,l.it.id,true);if(l.used){if(a>0){o.on=true;o.amount=a;o.confirmed=true;if(l.due!==ruleDate(l.it,l.m))o.due=l.due;n++}}
-    else{o.amount=a;o.confirmed=true;n++}});
+    const o=ov(l.m,l.it.id,true);if(l.used){if(a>0){o.on=true;setTotal(o,a);o.confirmed=true;if(l.due!==ruleDate(l.it,l.m))o.due=l.due;n++}}
+    else{setTotal(o,a);o.confirmed=true;n++}});
   return n;
 }
 function openStatements(){
@@ -2039,7 +2072,7 @@ function openPayAll(key){
   const f=openDlg(`Pay ${xs.length} bills`,b,`<button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="paBtn">Pay ${money(tot)}</button>`,fdata=>{
     const acc=fdata.get('acc')||'',date=fdata.get('date');let t=0,n=0;
     xs.forEach((x,i)=>{if(!fdata.get('pa_'+i))return;const o=ov(x.m,x.it.id,true);o.pays=o.pays||[];o.pays.push({id:uid(),date,amount:x.rem,acc,note:'Paid with other bills',at:Date.now()});
-      if(x.k!=='loan'&&!x.confirmed){o.amount=r2(x.paid+x.rem);o.confirmed=true}if(x.it.mode==='used')o.on=true;t+=x.rem;n++});
+      if(x.k!=='loan'&&!x.confirmed){setTotal(o,x.paid+x.rem);o.confirmed=true}if(x.it.mode==='used')o.on=true;t+=x.rem;n++});
     if(!n)return false;const a=acct(acc);if(a)a.balance=r2((+a.balance||0)-t);
     setTimeout(()=>toast(`${n} bills paid, ${money(t)}${a?' from '+esc(a.name):''}`,()=>restore(j0)),0);
   });
@@ -2111,7 +2144,7 @@ function mRow(it){
   const own=it.owner&&it.owner!=='Me'?` <span class="tag">${esc(it.owner)}</span>`:'';
   let prog='';
   if(k==='loan'&&it.from&&it.until){const tot=mIdx(it.until)-mIdx(it.from)+1,n=Math.min(tot,Math.max(0,mIdx(VM)-mIdx(it.from)+1));prog=`<div class="mpl"><span class="mprog"><i style="width:${n/tot*100}%"></i></span><small>EMI ${n} of ${tot} · ends ${fm(it.until)}</small></div>`}
-  else prog=`<small>${esc(schedTxt(it,VM))}${it.until&&k!=='once'?` · until ${fm(it.until)}`:''}</small>`;
+  else prog=`<small>${esc(schedTxt(it,VM))}${it.until&&k!=='once'?` · until ${fm(it.until)}`:''}${S.incoming.filter(f=>f.cashAt&&f.cashAt.card===it.id&&f.cashAt.m>=CUR).map(f=>` · <b>${fmS(f.cashAt.m)} bill includes card cash ${money(inst(it,f.cashAt.m).cash)}</b>`).join('')}</small>`;
   const amt=it.mode==='used'?`<span class="muted small">when used</span>`:k==='once'?`<b class="num">${money(it.amount)}</b>`:
     `<label class="mi"><span>₹</span><input type="number" inputmode="decimal" step="0.01" min="0" data-edit="amount" data-id="${it.id}" value="${it.amount}" aria-label="${esc(it.name)} ${k==='loan'?'EMI':'usual amount'}"></label>`;
   const day=it.budget&&k==='bill'?`<span class="mi day muted small">budget</span>`:r.type==='day'&&k!=='once'?`<label class="mi day"><span>day</span><input type="number" min="1" max="31" data-edit="day" data-id="${it.id}" value="${r.day}" aria-label="${esc(it.name)} due day"></label>`:`<span class="mi day muted small">${r.type==='last'?'last day':r.type==='none'?'any day':r.type==='date'?fd(r.date):''}</span>`;
@@ -2257,7 +2290,7 @@ function openShare(){
 function delItemNow(id){
   S.items=S.items.filter(i=>i.id!==id);
   Object.values(S.months).forEach(mo=>{delete mo[id]});
-  S.incoming.forEach(f=>{if(f.link===id)f.link=null});
+  S.incoming.forEach(f=>{if(f.link===id)f.link=null;if(f.cashAt&&f.cashAt.card===id)delete f.cashAt});
 }
 function download(name,text,type){if(!CAN_SAVE){note('Downloads are blocked in this preview. Open the file in your browser to download a backup.');return}const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}
 const after=()=>{save();render();if(dlg.open&&reopen)reopen()};
@@ -2330,7 +2363,7 @@ document.addEventListener('click',e=>{
     case 'delAcc':{const ac=acct(id);ask(`Delete <b>${esc(ac.name)}</b>? Its ${money(ac.balance)} is no longer counted. Payments made from it stay paid, but undoing them later will not put money anywhere.`,()=>{S.accounts=S.accounts.filter(x=>x.id!==id);dlg.close();save();render()},{ok:'Delete',danger:1});break}
     case 'addInc':incForm(null);break;
     case 'editInc':incForm(id);break;
-    case 'delInc':{const f=inc(id);ask(`Delete <b>${esc(f.name)}</b>?${f.link?' Its linked card repayment will be deleted too.':''}`,()=>{if(f.link)delItemNow(f.link);S.incoming=S.incoming.filter(x=>x.id!==id);dlg.close();save();render()},{ok:'Delete',danger:1});break}
+    case 'delInc':{const f=inc(id);ask(`Delete <b>${esc(f.name)}</b>?${f.cashAt?' The card cash repayment is taken off the card bill too.':''}`,()=>{cashClear(f);S.incoming=S.incoming.filter(x=>x.id!==id);dlg.close();save();render()},{ok:'Delete',danger:1});break}
     case 'recv':openRecv(id,m);break;
     case 'unrecv':{const f=inc(id);const r0=f.type==='monthly'?f.rec[m]:{amt:f.recAmt,acc:f.recAcc,date:f.recOn,at:f.recAt,added:f.recAdded};
       const a=r0&&r0.acc&&acct(r0.acc),added=r0&&r0.added!==false;
