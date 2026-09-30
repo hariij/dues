@@ -1,0 +1,31 @@
+rules_version = '2';
+
+// Dues Planner: only hariij@gmail.com, plus any email the owner adds in the app
+// (Settings > Who can open your data). Everything else is denied.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+    function isOwner() {
+      return signedIn() && request.auth.token.email == "hariij@gmail.com";
+    }
+    function isInvited() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/access/home)
+        && request.auth.token.email in get(/databases/$(database)/documents/access/home).data.emails;
+    }
+
+    // The list of extra people. Only the owner can change it.
+    match /access/home {
+      allow read: if isOwner() || isInvited();
+      allow write: if isOwner();
+    }
+
+    // All planner data.
+    match /spaces/home/{document=**} {
+      allow read, write: if isOwner() || isInvited();
+    }
+  }
+}
