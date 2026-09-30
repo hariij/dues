@@ -618,7 +618,8 @@ function migrate(o){
 }
 S=migrate(S);
 if(!S||S.v!==6)S=migrate(fresh());
-function save(){logChanges();store.set(KEY,JSON.stringify(S));if(typeof cloudQueue==='function')cloudQueue()}
+var VIEWONLY=false;
+function save(){if(VIEWONLY){try{S=migrate(JSON.parse(store.get(KEY)))}catch(e){}render();note('You are offline, so this change was not saved. Open the app again when you are back online.');return}logChanges();store.set(KEY,JSON.stringify(S));if(typeof cloudQueue==='function')cloudQueue()}
 /* ============ activity log ============ */
 const LOGMAX=200;
 function fineMap(st){
@@ -756,7 +757,7 @@ function activityHTML(){
 }
 
 rebase();
-const APP_VER='2026.10.01 (one card)';
+const APP_VER='2026.10.01 (offline)';
 /* ============ cloud sync (Firebase free plan, optional) ============ */
 const FB='https://www.gstatic.com/firebasejs/10.12.2/';
 const CLOUDKEY='duesPlanner.cloud',WHOKEY='duesPlanner.who';
@@ -807,7 +808,8 @@ function syncBadge(){
   const el=$('#sync');if(!el)return;
   if(!Cloud.on){el.hidden=true;return}
   el.hidden=false;let t,c;
-  if(!Cloud.user){t='Not signed in';c='off'}
+  if(Cloud.viewOnly){t='Offline, view only';c='warn'}
+  else if(!Cloud.user){t='Not signed in';c='off'}
   else if(Cloud.err){t='Sync problem';c='bad'}
   else if(!navigator.onLine){t='Offline, will sync';c='warn'}
   else if(Cloud.pending||!Cloud.ready){t='Saving…';c='warn'}
@@ -868,7 +870,7 @@ async function cloudBoot(){
     Cloud.auth=Au.getAuth(app);
     try{Cloud.db=F.initializeFirestore(app,{localCache:F.persistentLocalCache({tabManager:F.persistentMultipleTabManager()})})}
     catch(e){Cloud.db=F.initializeFirestore(app,{localCache:F.memoryLocalCache()})}
-    try{await Au.getRedirectResult(Cloud.auth)}catch(e){Cloud.err=e.code||e.message}
+    try{await Promise.race([Au.getRedirectResult(Cloud.auth),new Promise(ok=>setTimeout(ok,navigator.onLine?8000:1500))])}catch(e){Cloud.err=e.code||e.message}
     Au.onAuthStateChanged(Cloud.auth,u=>{
       Cloud.user=u;syncBadge();
       if(!u){stopListen();showGate('signin');return}
@@ -877,7 +879,12 @@ async function cloudBoot(){
       store.set(WHOKEY,u.email);
       cloudListen();
     });
-  }catch(e){showGate('error',e)}
+  }catch(e){
+    if(store.get(WHOKEY)&&(S.items.length||S.accounts.length)){ // offline and the cloud code is not saved yet: show this device's copy, read only
+      VIEWONLY=Cloud.viewOnly=true;openApp();syncBadge();
+      $('#notice').innerHTML='<div><b>You are offline.</b> Showing the copy saved on this device. Changes need a connection this time; open the app again when you are back online.</div>';
+    }else showGate('error',e);
+  }
 }
 async function signIn(){
   const {GoogleAuthProvider,signInWithPopup,signInWithRedirect}=Cloud.api,p=new GoogleAuthProvider();
@@ -2440,6 +2447,7 @@ addEventListener('hashchange',onHash);addEventListener('popstate',onHash);
 let rz;addEventListener('resize',()=>{clearTimeout(rz);rz=setTimeout(render,150)});
 if(!CAN_SAVE)$('#notice').innerHTML='<div><b>Saving is off in this preview.</b> Changes here are lost when you close it. Download the file and open it in Chrome, Safari or Edge to keep your data.</div>';
 if(Cloud.on)cloudBoot();else render();
+try{if('serviceWorker' in navigator&&/^https?:$/.test(location.protocol))navigator.serviceWorker.register('sw.js').catch(()=>{})}catch(e){}
 syncBadge();
 </script>
 </body>
