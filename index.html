@@ -490,6 +490,13 @@ input.aname:not([type=checkbox]):hover,input.aname:not([type=checkbox]):focus,.m
   .act{grid-template-columns:60px 1fr auto;padding:10px 12px}
   .wk-k{text-align:left}
 }
+
+/* budgets */
+.bmeter{display:block;height:5px;border-radius:3px;background:var(--grid);margin-top:5px;overflow:hidden;max-width:260px}
+.bmeter i{display:block;height:100%;background:var(--good);border-radius:3px}
+.bmeter.over i{background:var(--crit)}
+.trow.bud .tn small{display:block}
+.row.bud .nm .b{color:var(--ink2)}
 </style>
 </head>
 <body>
@@ -594,10 +601,11 @@ function migrate(o){
   }
   if(o&&o.v===5){if(!o.bundle)o.bundle={from:28,to:27};else if(o.bundle.from===28)o.bundle.to=27;o.v=6}
   if(o){if(!o.bundle)o.bundle={from:28,to:27};if(!o.planFrom)o.planFrom=15}
+  if(o&&o.items)o.items.forEach(it=>{if(it.budget===undefined&&it.freq&&(it.rule||{}).type==='none'&&/provision|grocer|fruit|vegetable|veggie/i.test(it.name||''))it.budget=true});
   return o;
 }
 S=migrate(S);
-if(!S||S.v!==6)S=fresh();
+if(!S||S.v!==6)S=migrate(fresh());
 function save(){logChanges();store.set(KEY,JSON.stringify(S));if(typeof cloudQueue==='function')cloudQueue()}
 /* ============ activity log ============ */
 const LOGMAX=200;
@@ -643,16 +651,21 @@ function describe(ch){
       const L=[];if(a.name!==b.name)L.push(`Renamed ${b.name} to ${a.name}`);
       if((+a.amount||0)!==(+b.amount||0))L.push(`${a.name}: usual amount ${money(b.amount||0)} → ${money(a.amount||0)}`);
       if(JSON.stringify(a.rule)!==JSON.stringify(b.rule)){const r=a.rule||{};L.push(`${a.name}: now due ${r.type==='day'?'on the '+ord(r.day)+(r.prev?' of the month before':''):r.type==='last'?'on the last day':r.type==='date'?fd(r.date):'any day'}`)}
+      if(!!a.budget!==!!b.budget)L.push(a.budget?`${a.name} is now a spending budget`:`${a.name} is now a regular bill`);
       if(a.until!==b.until)L.push(a.until?`${a.name}: ends after ${fmL(a.until)}`:`${a.name}: no end month`);
       if(a.freq!==b.freq&&a.freq)L.push(`${a.name}: now every ${a.freq===1?'month':a.freq+' months'}`);
       if(a.cat!==b.cat)L.push(`Moved ${a.name} to ${(catOf(a.cat)||{}).name||'another category'}`);
       if(a.owner!==b.owner)L.push(`${a.name}: now ${a.owner==='Me'?'your card':a.owner+"'s card"}`);
+      const strip=o=>JSON.stringify(Object.assign({},o,{lastAcc:0}));
+      if(!L.length&&strip(a)===strip(b))continue; // only the remembered account changed
       O.push(...(L.length?L:[`Edited ${a.name}`]));continue}
     if(col==='m'){
       const [,m,id]=k.split('/'),nm=nameOf(id),Mn=fmS(m),b0=b||{},a0=a||{};
       const bp=b0.pays||[],ap=a0.pays||[],bi=new Set(bp.map(p=>p.id)),ai=new Set(ap.map(p=>p.id));
       const add=ap.filter(p=>!bi.has(p.id)),rem=bp.filter(p=>!ai.has(p.id));
-      add.forEach(p=>P.push(`Paid ${nm} ${money(p.amount)}${p.acc&&accN(p.acc)?' from '+accN(p.acc):''}`));
+      const bu=isBud(item(id));
+      add.forEach(p=>P.push(bu?`Spent ${money(p.amount)} on ${nm}${p.acc&&accN(p.acc)?' from '+accN(p.acc):''}`:`Paid ${nm} ${money(p.amount)}${p.acc&&accN(p.acc)?' from '+accN(p.acc):''}`));
+      if(!!a0.closed!==!!b0.closed)O.push(a0.closed?`Closed ${nm} budget for ${Mn}`:`Reopened ${nm} budget for ${Mn}`);
       rem.forEach(p=>P.push(`Removed ${nm} payment of ${money(p.amount)}`));
       if(!!a0.skip!==!!b0.skip)O.push(a0.skip?`Skipped ${nm} for ${Mn}`:`Included ${nm} in ${Mn} again`);
       if(!add.length&&!rem.length){
@@ -730,7 +743,7 @@ function activityHTML(){
 }
 
 rebase();
-const APP_VER='2026.10.01 (round 2)';
+const APP_VER='2026.10.01 (budgets)';
 /* ============ cloud sync (Firebase free plan, optional) ============ */
 const FB='https://www.gstatic.com/firebasejs/10.12.2/';
 const CLOUDKEY='duesPlanner.cloud',WHOKEY='duesPlanner.who';
@@ -922,8 +935,13 @@ function inst(it,m){
   const paid=sum(pays,p=>p.amount);
   const rem=Math.max(0,r2(amount-paid));
   const due=o.due||ruleDate(it,m);
+  if(k==='bill'&&it.budget){ // spending budget: never overdue, unspent is released at month end or when closed
+    const done=m<CUR||!!o.closed,rb=done?0:Math.max(0,r2(amount-paid));
+    return{it,m,k,o,amount:done?paid:Math.max(amount,paid),budAmt:amount,paid,rem:rb,pays,due:null,skip:!!o.skip,confirmed:true,bud:true,closed:done,over:Math.max(0,r2(paid-amount)),status:rb<=0?'paid':paid>0?'partial':'open'};
+  }
   return{it,m,k,o,amount,paid,rem,pays,due,skip:!!o.skip,confirmed:k==='loan'||k==='once'||!!o.confirmed,status:rem<=0?'paid':paid>0?'partial':'open'};
 }
+const isBud=it=>!!(it&&it.budget&&kindOf(it)==='bill');
 const monthAll=m=>S.items.filter(it=>occursIn(it,m)).map(it=>inst(it,m));
 const monthList=m=>monthAll(m).filter(x=>!x.skip);
 function byDue(a,b){if(a.due===b.due)return a.it.name.localeCompare(b.it.name);if(!a.due)return 1;if(!b.due)return -1;return a.due<b.due?-1:1}
@@ -956,6 +974,7 @@ function schedTxt(it,m){
   if(k==='once')return it.link?'One-time · card cash repayment':'One-time';
   if(k==='card')return it.mode==='used'?`Only when used · due ${when}`:`Every month · due ${when}`;
   const f={1:'Every month',2:'Every 2 months',3:'Every 3 months',6:'Every 6 months',12:'Every year'}[it.freq]||'Repeats';
+  if(it.budget)return `${it.freq===1?'Monthly':f} budget · spend any day`;
   return `${f} · ${r.type==='none'?'no fixed date':'due '+when}`;
 }
 function flagOf(x){
@@ -1006,6 +1025,7 @@ function timeline(untilD,use){
       if(x.it.link){const lf=inc(x.it.link);if(lf&&!lf.received&&!use({f:lf,key:lf.id,d:lf.date,amt:+lf.amount||0}))return} // no card cash, no repayment
       if(x.due){ev.push({d:x.due<TODAY?TODAY:x.due,a:-x.rem,lab:x.it.name,x,late:x.due<TODAY});return}
       let pts=[1,8,15,22].map(d=>`${m}-${pad(d)}`).filter(d=>d>=TODAY);
+      if(x.bud&&TODAY>=`${m}-01`){pts=[];for(let d=TODAY;d<=lastDay(m);d=addDays(d,7))pts.push(d)} // what is left of a budget, spread week by week from today
       if(!pts.length)pts=[TODAY];
       const part=r2(x.rem/pts.length);
       pts.forEach((d,i)=>ev.push({d,a:-(i===pts.length-1?r2(x.rem-part*(pts.length-1)):part),lab:x.it.name+' (part)',x,spread:1}));
@@ -1103,7 +1123,15 @@ function render(){
   ({home:rHome,dues:rDues,money:rMoney,plan:rPlan,manage:rManage}[r]||rHome)(p);
 }
 
+function budTxt(x){return x.closed&&x.m<CUR?`${money(x.paid)} spent${x.budAmt?` of ${money(x.budAmt)}`:''}`:x.closed?`${money(x.paid)} spent, budget closed`:`${money(x.paid)} of ${money(x.budAmt)} spent`}
+function budAmt(x){return x.over>0?`<span class="neg">${money(x.over)} over</span>`:x.rem>0?`${money(x.rem)} <small class="muted">left</small>`:`<span class="okmark">✓</span> ${money(x.paid)}`}
+const budMeter=x=>`<span class="bmeter${x.over>0?' over':''}"><i style="width:${Math.min(100,x.budAmt?x.paid/x.budAmt*100:0)}%"></i></span>`;
 function rowHTML(x,opt={}){
+  if(x.bud){const it=x.it,c=catOf(it.cat);
+    return `<div class="row bud${x.rem<=0?' paid':''}" data-act="open" data-id="${it.id}" data-m="${x.m}" tabindex="0" role="button" aria-label="${esc(it.name)}">
+    <div class="dt nd"><b>Budget</b></div><div class="nm"><div class="a">${opt.sw?`<span class="sw" style="--c:${col(c)}"></span>`:''}<span class="t">${esc(it.name)}</span></div><div class="b">${budTxt(x)}</div>${budMeter(x)}</div>
+    <div class="rt"><div class="amt">${budAmt(x)}</div></div>
+    <div class="act">${!x.closed?`<button class="btn sm" data-act="spend" data-id="${it.id}" data-m="${x.m}">Spent</button>`:''}</div></div>`}
   const it=x.it,c=catOf(it.cat),cls=[x.status==='paid'?'paid':'',heat(x)].join(' ');
   const dt=x.due?`<div class="dt"><b>${parse(x.due).getDate()}</b><span>${esc(mon(x.due))}</span></div>`:`<div class="dt nd"><b>Any day</b></div>`;
   const owner=it.owner&&it.owner!=='Me'?`<span class="tag">${esc(it.owner)}</span>`:'';
@@ -1199,6 +1227,7 @@ function dayLabel(d){
   return {t:fdw(d),s:`in ${n} days`};
 }
 function trow(x){
+  if(x.bud){const it=x.it,c=catOf(it.cat);return `<div class="trow bud" data-act="open" data-id="${it.id}" data-m="${x.m}" role="button" tabindex="0"><span class="sw" style="--c:${col(c)}" title="${esc(c.name)}"></span><span class="tn">${esc(it.name)}<small>${budTxt(x)}</small>${budMeter(x)}</span><b class="amt">${budAmt(x)}</b>${!x.closed?`<button class="btn sm" data-act="spend" data-id="${it.id}" data-m="${x.m}">Spent</button>`:'<span></span>'}</div>`}
   const it=x.it,c=catOf(it.cat);
   const tags=(it.owner&&it.owner!=='Me'?` <span class="tag">${esc(it.owner)}</span>`:'')+(!x.confirmed?' <span class="est">Estimate</span>':'')+(x.status==='partial'?` <span class="muted small">${money(x.paid)} paid</span>`:'');
   return `<div class="trow" data-act="open" data-id="${it.id}" data-m="${x.m}" role="button" tabindex="0"><span class="sw" style="--c:${col(c)}" title="${esc(c.name)}"></span><span class="tn">${esc(it.name)}${tags}</span><b class="amt">${money(x.rem)}</b><button class="btn sm primary" data-act="pay" data-id="${it.id}" data-m="${x.m}">Pay</button></div>`;
@@ -1223,7 +1252,7 @@ function todoList(ctx){
       if(x.rem<=0)return;
       if(x.due){if(x.due<TODAY){if(mode!=='next')xs.push(x)}else if(x.due>=R[0]&&x.due<=R[1])xs.push(x)}
       else if(m<CUR){if(mode!=='next')xs.push(x)}
-      else if(mode==='month'&&m===VM)xs.push(x);
+      else if(mode==='month'&&m===VM&&!x.bud)xs.push(x);
     });
     xs.sort(byDue);
     const groups=[];xs.forEach(x=>{const k=!x.due&&x.m<CUR?'late':(x.due&&x.due<TODAY?'late':(x.due||'any'));let g=groups.find(g=>g.k===k);if(!g)groups.push(g={k,xs:[]});g.xs.push(x)});
@@ -1242,6 +1271,11 @@ function todoList(ctx){
   return `<div class="sec-h todo-h"><h2>To do</h2>${tabs}</div><div class="card todos">${sub?`<div class="tsum">${sub}</div>`:''}${body}${legend}</div>`;
 }
 
+function budgetsCard(){
+  if(VM<CUR)return '';const B=monthList(VM).filter(x=>x.bud);if(!B.length)return '';
+  const left=sum(B,x=>x.rem),bud=sum(B,x=>x.budAmt),sp=sum(B,x=>x.paid);
+  return `<div class="sec-h"><h2>Budgets this month</h2><span class="sub">${money(sp)} of ${money(bud)} spent</span></div><div class="card todos">${B.map(trow).join('')}<p class="note" style="padding:4px 14px 12px;margin:0">Tap <b>Spent</b> each time you buy something. The ${money(left)} left is kept aside in your plan. Anything unspent is released at month end.</p></div>`;
+}
 function monthProgress(s){
   const pct=s.due?s.paid/s.due*100:0;
   let h=`<div class="sec-h"><h2>${fmL(VM)}</h2><a class="lnk" href="#/dues">All dues</a></div><div class="card prog">
@@ -1263,6 +1297,7 @@ function rHome(){
   if(ear.length)h+=`<div style="margin-top:10px">`+banner('bad','!',`${ear.length} unpaid from earlier months (${money(sum(ear,x=>x.rem))})`,'<p>These are past their dates. <a class="lnk" href="#/dues">See them</a></p>')+'</div>';
   h+=moneyCard(ctx);
   h+=todoList(ctx);
+  h+=budgetsCard();
   h+=monthProgress(s);
   if(ctx.sc)h+=`<p class="note" style="margin-top:14px">The calendar, weeks and full breakdown are on <a class="lnk" href="#/plan">Plan</a>. <button class="lnk" data-act="share">Share a summary</button></p>`;
   view.innerHTML=h;
@@ -1679,8 +1714,9 @@ function itemForm(kind,it,pre){
     b+=fld('Usual amount (estimate)',money$('amount',it.amount,1),'A budget. You can enter the actual amount each month.');
     const nx=it.freq>1?(occursIn(it,VM)?VM:nextOcc(it,VM)||VM):VM;
     b+=`<div class="g2">${fld('How often?',`<select name="freq">${[[1,'Every month'],[2,'Every 2 months'],[3,'Every 3 months'],[6,'Every 6 months'],[12,'Every year']].map(([v,l])=>`<option value="${v}" ${(it.freq||1)==v?'selected':''}>${l}</option>`).join('')}</select>`)}<div data-show="freq!=1">${fld('Next due in',`<input name="next" type="month" value="${nx}">`)}</div></div>`;
-    b+=fld('When is it due?',seg('rtype',[['day','On a day'],['last','Last day of month'],['none','No fixed date']],r.type||'day'));
-    b+=`<div data-show="rtype=day">${fld('Due day of the month',`<input name="day" type="number" min="1" max="31" value="${r.day||5}" required>`)}</div>`;
+    b+=`<label class="chk" style="margin-bottom:10px"><input type="checkbox" name="budget" ${it.budget?'checked':''}><span>This is a spending budget<br><span class="small muted">For things you buy through the month, like groceries or fruits. You log what you spend, and whatever is left is released at month end.</span></span></label>`;
+    b+=`<div id="dueBox">${fld('When is it due?',seg('rtype',[['day','On a day'],['last','Last day of month'],['none','No fixed date']],r.type||'day'))}
+    <div data-show="rtype=day">${fld('Due day of the month',`<input name="day" type="number" min="1" max="31" value="${r.day||5}" required>`)}</div></div>`;
   }
   if(kind==='once'){
     const cid=it.cat||pre.cat||(S.cats.find(c=>c.kind==='bill')||{}).id;
@@ -1709,6 +1745,7 @@ function itemForm(kind,it,pre){
       it.cat=c;it.freq=parseInt(fdata.get('freq'))||1;
       if(it.freq>1){const nx=fdata.get('next')||VM;it.anchor=nx;if(isNew)it.from=nx}else{if(isNew)it.from=VM;it.anchor=''}
       const rt=fdata.get('rtype');it.rule=rt==='day'?{type:'day',day:Math.min(31,Math.max(1,parseInt(fdata.get('day'))||1))}:{type:rt};
+      it.budget=!!fdata.get('budget');if(it.budget)it.rule={type:'none'};
     }
     if(kind==='once'){const d=fdata.get('date');it.cat=fdata.get('cat');it.freq=0;it.rule={type:'date',date:d};it.from=monthOf(d);it.until=it.from;it.anchor=''}
     if(isNew){it.id=uid();S.items.push(it);
@@ -1718,7 +1755,8 @@ function itemForm(kind,it,pre){
     if(it.link){const f=inc(it.link);if(f&&kind==='once'){f.repay=it.rule.date}}
   });
   wireShow(f);
-  f.querySelectorAll('[data-tpl]').forEach(bn=>bn.addEventListener('click',()=>{const t=TEMPLATES[+bn.dataset.tpl];
+  const bx=f.elements.budget,syncB=()=>{if(bx&&$('#dueBox'))$('#dueBox').hidden=bx.checked};if(bx){bx.addEventListener('change',syncB);syncB()}
+  f.querySelectorAll('[data-tpl]').forEach(bn=>bn.addEventListener('click',()=>{const t=TEMPLATES[+bn.dataset.tpl];if(bx){bx.checked=!!t[5];syncB()}
     f.name.value=t[0];f.amount.value=t[1];f.freq.value=t[2];const rb=f.querySelector(`input[name=rtype][value=${t[3]}]`);if(rb)rb.checked=true;if(t[4])f.day.value=t[4];
     f.querySelectorAll('[data-tpl]').forEach(x=>x.setAttribute('aria-pressed',x===bn));f.dispatchEvent(new Event('change',{bubbles:true}));f.amount.focus();f.amount.select()}));
   if(kind==='loan'){const upd=()=>{const a=f.from.value,z=f.until.value;$('#emiN').textContent=a&&z&&z>=a?`${mIdx(z)-mIdx(a)+1} EMIs in total${f.amount.value?`, ${money(num(f.amount.value)*(mIdx(z)-mIdx(a)+1))} altogether`:''}.`:'Enter the last EMI month to see the number of EMIs.'};f.addEventListener('input',upd);upd()}
@@ -1732,6 +1770,7 @@ function editItem(id){const it=item(id);itemForm(kindOf(it),it)}
 /* ----- instance detail ----- */
 function openInst(id,m){
   const it=item(id);if(!it)return;
+  if(isBud(it))return openBud(id,m);
   const x=inst(it,m),k=x.k,c=catOf(it.cat);
   const owner=it.owner&&it.owner!=='Me'?` <span class="tag">${esc(it.owner)}</span>`:'';
   let b=`<p class="muted" style="margin:0">${esc(c.name)} · ${esc(schedTxt(it,m))}</p>`;
@@ -1762,8 +1801,48 @@ function openInst(id,m){
   const a=f.amount,ch=f.actual;if(a&&ch)a.addEventListener('input',()=>{ch.checked=true});
 }
 
+function openBud(id,m){
+  const it=item(id),x=inst(it,m),c=catOf(it.cat);
+  let b=`<p class="muted" style="margin:0">${esc(c.name)} · ${esc(schedTxt(it,m))}</p>`;
+  b+=`<div class="sumbox"><div><span class="muted small">${x.closed?(m<CUR?`${fmS(m)} is over`:'Budget closed'):x.over>0?'Over budget':'Left this month'}</span><span class="big${x.over>0?' neg':''}">${money(x.over>0?x.over:x.closed?x.paid:x.rem)}</span><span class="muted small">${x.closed?'spent':`${money(x.paid)} of ${money(x.budAmt)} spent`}</span></div></div>${budMeter(x)}`;
+  if(!x.closed)b+=`<button type="button" class="btn primary wide" style="margin-top:12px" data-act="spend" data-id="${id}" data-m="${m}">Add spending</button>`;
+  b+=`<h4>Spending in ${fmL(m)}</h4>${x.pays.length?`<ul class="pays">${x.pays.slice().sort((a,b)=>a.date<b.date?1:-1).map(p=>`<li><span>${fd(p.date)} · ${money(p.amount)}<br><span class="small muted">${p.acc&&acct(p.acc)?'from '+esc(acct(p.acc).name):'cash, card or already counted'}${p.note?' · '+esc(p.note):''}</span></span><button type="button" class="btn sm ghost danger" data-act="delPay" data-id="${id}" data-m="${m}" data-p="${p.id}">Remove</button></li>`).join('')}</ul>`:'<p class="muted small" style="margin:0">Nothing spent yet.</p>'}`;
+  if(m>=CUR){
+    b+=`<h4>${fmL(m)} budget</h4><div class="g2">${fld('Budget this month',money$('amount',x.budAmt,1))}<div></div></div><label class="chk"><input type="checkbox" name="usual"> Use this amount for later months too</label><div style="margin-top:12px"><button class="btn">Save budget</button></div>`;
+    b+=`<h4>More</h4><div class="btnrow">${x.o.closed?`<button type="button" class="btn sm" data-act="budOpen" data-id="${id}" data-m="${m}">Reopen this budget</button>`:x.rem>0?`<button type="button" class="btn sm" data-act="budClose" data-id="${id}" data-m="${m}">Done for ${fmS(m)}, release ${money(x.rem)}</button>`:''}`;
+  }else b+=`<div class="btnrow" style="margin-top:14px">`;
+  b+=`<button type="button" class="btn sm" data-act="editItem" data-id="${id}">Edit budget</button><button type="button" class="btn sm danger" data-act="delItem" data-id="${id}">Delete</button></div>`;
+  openDlg(esc(it.name),b,'',fdata=>{
+    const amt=num(fdata.get('amount')),o=ov(m,id,true);
+    if(fdata.get('usual')){freezePast(it,m);it.amount=amt;delete o.amount}else if(amt!==(it.amount||0)||o.amount!=null)o.amount=amt;
+    return 'keep';
+  },()=>openBud(id,m));
+}
+/* ----- spend from a budget ----- */
+function openSpend(id,m){
+  const it=item(id),x=inst(it,m),j0=snap();
+  const def=acct(x.o.lastAcc)||acct(it.lastAcc)||S.accounts[0];
+  let b=`<div class="sumbox"><div><span class="muted small">${x.over>0?'Over budget':'Left this month'}</span><span class="big${x.over>0?' neg':''}">${money(x.over>0?x.over:x.rem)}</span><span class="muted small">${money(x.paid)} of ${money(x.budAmt)} spent in ${fmS(m)}</span></div></div>`;
+  b+=fld('How much did you spend?',money$('amt','',1)+`<div class="quick">${[100,200,500,1000].map(v=>`<button type="button" class="btn sm" data-q="${v}">${money(v)}</button>`).join('')}</div>`);
+  b+=`<div class="g2">${fld('Date',`<input type="date" name="date" value="${TODAY}" required>`)}${fld('Paid from',`<select name="acc">${S.accounts.map(a=>`<option value="${a.id}" ${def&&a.id===def.id?'selected':''}>${esc(a.name)} (${money(a.balance)})</option>`).join('')}<option value="">Cash, a card, or already in my balance</option></select>`)}</div><p class="hint" id="spHint"></p>`;
+  b+=fld('Note (optional)','<input name="note" autocomplete="off" placeholder="e.g. Reliance Fresh">');
+  const f=openDlg(`Spent on ${esc(it.name)}`,b,`<button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button>`,fdata=>{
+    const amt=r2(num(fdata.get('amt')));if(!(amt>0)){f.amt.focus();return false}
+    const o=ov(m,id,true),acc=fdata.get('acc')||'';o.pays=o.pays||[];
+    o.pays.push({id:uid(),date:fdata.get('date'),amount:amt,acc,note:(fdata.get('note')||'').trim(),at:Date.now()});
+    const a=acct(acc);if(a)a.balance=r2((+a.balance||0)-amt);it.lastAcc=acc;
+    const y=inst(it,m);setTimeout(()=>toast(`${money(amt)} spent on ${esc(it.name)}. ${y.over>0?money(y.over)+' over budget':money(y.rem)+' left'}`,()=>restore(j0)),0);
+  });
+  const hint=()=>{const a=acct(f.acc.value),v=num(f.amt.value),h=$('#spHint');
+    h.className='hint'+(a&&(+a.balance||0)-v<0?' warn':'');
+    h.innerHTML=(a?`${esc(a.name)}: ${money(a.balance)} → <b>${money(r2((+a.balance||0)-v))}</b>`:'Your balances will not change.')+(v&&x.rem-v<0?` · this goes ${money(r2(v-x.rem))} over the budget`:v?` · ${money(r2(x.rem-v))} left after this`:'')};
+  f.addEventListener('input',hint);f.addEventListener('change',hint);hint();
+  f.querySelectorAll('[data-q]').forEach(bn=>bn.addEventListener('click',()=>{f.amt.value=bn.dataset.q;hint();f.amt.focus()}));
+}
+
 /* ----- pay ----- */
 function openPay(id,m){
+  if(isBud(item(id)))return openSpend(id,m);
   const it=item(id),x=inst(it,m),k=x.k,j0=snap();
   const lastUpd=S.accounts.map(a=>a.updated||'').sort().pop()||'';
   const already=x.o.lastAcc===''||(x.due&&lastUpd&&x.due<lastUpd); // paid before the balance was entered: don't take it off again
@@ -2013,7 +2092,7 @@ function openCheckin(step){
 dlg.addEventListener('close',()=>{if(ciPending){const p=ciPending;ciPending=null;setTimeout(()=>reconcile(p.ids,p.ch),80)}});
 
 /* ---- Manage tab ---- */
-const TEMPLATES=[['LPG cylinder',1100,2,'none'],['Electricity',3000,2,'day',5],['Water',500,1,'day',10],['Rent',15000,1,'day',5],['Internet',800,1,'day',10],['Mobile recharge',400,1,'day',15],['Newspaper',300,1,'day',5],['School fees',20000,3,'day',10],['Insurance premium',15000,12,'day',15],['Subscription',200,1,'day',1]];
+const TEMPLATES=[['Groceries budget',5000,1,'none',0,1],['Fruits & vegetables budget',2500,1,'none',0,1],['LPG cylinder',1100,2,'none'],['Electricity',3000,2,'day',5],['Water',500,1,'day',10],['Rent',15000,1,'day',5],['Internet',800,1,'day',10],['Mobile recharge',400,1,'day',15],['Newspaper',300,1,'day',5],['School fees',20000,3,'day',10],['Insurance premium',15000,12,'day',15],['Subscription',200,1,'day',1]];
 function rowMenu(it){return `<button class="btn sm ghost rmb" data-act="rmenu" data-id="${it.id}" aria-label="More actions for ${esc(it.name)}">⋯</button>`}
 function openRowMenu(id){
   const it=item(id);if(!it)return;const k=kindOf(it),on=occursIn(it,VM),o=ov(VM,id)||{};
@@ -2035,7 +2114,7 @@ function mRow(it){
   else prog=`<small>${esc(schedTxt(it,VM))}${it.until&&k!=='once'?` · until ${fm(it.until)}`:''}</small>`;
   const amt=it.mode==='used'?`<span class="muted small">when used</span>`:k==='once'?`<b class="num">${money(it.amount)}</b>`:
     `<label class="mi"><span>₹</span><input type="number" inputmode="decimal" step="0.01" min="0" data-edit="amount" data-id="${it.id}" value="${it.amount}" aria-label="${esc(it.name)} ${k==='loan'?'EMI':'usual amount'}"></label>`;
-  const day=r.type==='day'&&k!=='once'?`<label class="mi day"><span>day</span><input type="number" min="1" max="31" data-edit="day" data-id="${it.id}" value="${r.day}" aria-label="${esc(it.name)} due day"></label>`:`<span class="mi day muted small">${r.type==='last'?'last day':r.type==='none'?'any day':r.type==='date'?fd(r.date):''}</span>`;
+  const day=it.budget&&k==='bill'?`<span class="mi day muted small">budget</span>`:r.type==='day'&&k!=='once'?`<label class="mi day"><span>day</span><input type="number" min="1" max="31" data-edit="day" data-id="${it.id}" value="${r.day}" aria-label="${esc(it.name)} due day"></label>`:`<span class="mi day muted small">${r.type==='last'?'last day':r.type==='none'?'any day':r.type==='date'?fd(r.date):''}</span>`;
   return `<div class="mrow2" data-name="${esc((it.name+' '+(it.owner||'')).toLowerCase())}"><div class="mn"><button class="lnk plain" data-act="editItem" data-id="${it.id}">${esc(it.name)}</button>${own}${prog}</div>${amt}${day}${rowMenu(it)}</div>`;
 }
 function rManage(){
@@ -2158,6 +2237,8 @@ function summaryText(){
   const wk=[];for(let m=S.startMonth;m<=addMonths(CUR,1);m=addMonths(m,1))monthList(m).forEach(x=>{if(x.rem>0&&x.due&&x.due<=addDays(TODAY,6))wk.push(x)});
   wk.sort(byDue);
   if(wk.length){L.push('');L.push(`Due in the next 7 days (${money(sum(wk,x=>x.rem))}):`);wk.forEach(x=>L.push(`- ${x.it.name}${x.it.owner&&x.it.owner!=='Me'?` (${x.it.owner})`:''}: ${money(x.rem)}, ${x.due<TODAY?'overdue since '+fd(x.due):'by '+fd(x.due)}`))}
+  const BG=monthList(CUR).filter(x=>x.bud);
+  if(BG.length){L.push('');L.push(`Budgets for ${fmS(CUR)}:`);BG.forEach(x=>L.push(`- ${x.it.name}: ${money(x.paid)} of ${money(x.budAmt)} spent, ${x.over>0?money(x.over)+' over':x.closed?'closed':money(x.rem)+' left'}`))}
   const occ=sc?incOcc(sc.B.en):[];
   if(occ.length){L.push('');L.push('Money expected:');occ.forEach(o=>L.push(`- ${o.f.name}: ${money(o.amt)}, ${fd(o.d)}${o.f.sure?'':' (not sure)'}`))}
   return L.join('\n');
@@ -2261,6 +2342,9 @@ document.addEventListener('click',e=>{
     case 'again':{const f=inc(id);incForm(null,{type:'once',name:f.name,amount:f.amount,account:f.account,sure:false});break}
     case 'settings':openSettings();break;
     case 'rsDay':rsDayInfo(b.dataset.d);break;
+    case 'spend':e.stopPropagation();openSpend(id,m);break;
+    case 'budClose':{const j0=snap(),x=inst(item(id),m);ov(m,id,true).closed=true;after();toast(`${esc(item(id).name)} closed for ${fmS(m)}. ${money(x.rem)} released`,()=>restore(j0));break}
+    case 'budOpen':{const o=ov(m,id);if(o)delete o.closed;after();break}
     case 'pv':U.pv=b.dataset.k;saveU();render();break;
     case 'calDay':{U.calSel=b.dataset.d;$$('.cd.sel').forEach(x=>x.classList.remove('sel'));b.classList.add('sel');$('#calDay').innerHTML=calDayHTML(U.calSel);break}
     case 'share':openShare();break;
