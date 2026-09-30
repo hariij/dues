@@ -1215,7 +1215,7 @@ function activityHTML(){
 }
 
 rebase();
-const APP_VER='2026.10.01 (new look 3)';
+const APP_VER='2026.10.01 (new look 4)';
 /* ============ cloud sync (Firebase free plan, optional) ============ */
 const FB='https://www.gstatic.com/firebasejs/10.12.2/';
 const CLOUDKEY='duesPlanner.cloud',WHOKEY='duesPlanner.who';
@@ -1297,9 +1297,13 @@ function cloudListen(){
 function firstCloudLoad(){
   Cloud.ready=true;syncBadge();
   if(!Cloud.cache['meta/settings'])return showGate('first');
-  S=migrate(joinState(Cloud.cache));rebase();store.set(KEY,JSON.stringify(S));openApp();cloudQueue();
+  const same=!gated()&&stableJ(S)===stableJ(migrate(joinState(Cloud.cache)));
+  S=migrate(joinState(Cloud.cache));rebase();store.set(KEY,JSON.stringify(S));
+  if(same){syncBadge();cloudQueue();return} // the copy on screen is already current: no redraw, so the opening animation plays undisturbed
+  openApp();cloudQueue();
 }
 const gated=()=>document.body.classList.contains('gated');
+function stableJ(o){const f=x=>Array.isArray(x)?x.map(f):x&&typeof x==='object'?Object.keys(x).filter(k=>k!=='_o').sort().reduce((a,k)=>{a[k]=f(x[k]);return a},{}):x;return JSON.stringify(f(o))}
 function openApp(){document.body.classList.remove('gated');$('#gate').innerHTML='';VM=defMonth();render();syncBadge()}
 function showGate(kind,info){
   document.body.classList.add('gated');const g=$('#gate');
@@ -1600,7 +1604,10 @@ function render(){
   $('[data-act=mnext]').disabled=VM>=addMonths(CUR,24);
   const {r,p}=route();
   $$('#nav a').forEach(a=>{if(a.dataset.r===r||(r==='dues'&&a.dataset.r==='pay'))a.setAttribute('aria-current','page');else a.removeAttribute('aria-current')});
-  try{view.classList.toggle('noanim',!(MOTION&&r!==Mo.route))}catch(e){} // redraws of the same screen do not replay the chart animations
+  try{ // animate when a screen is opened; a redraw within a second of that (like the cloud copy arriving) restarts it once, later redraws do not
+    const now=performance.now(),opened=r!==Mo.route,cont=!opened&&Mo.animR===r&&now-Mo.animAt<1000;
+    Mo.anim=MOTION&&(opened||cont);if(MOTION&&opened){Mo.animAt=now;Mo.animR=r}
+    view.classList.toggle('noanim',!Mo.anim)}catch(e){}
   ({home:rHome,dues:rPay,pay:rPay,money:rMoney,plan:rPlan,manage:rManage}[r]||rHome)(p);
   if(typeof afterRender==='function')afterRender(r);
 }
@@ -2941,7 +2948,7 @@ function nextUp(){
 /* ============ motion: only to show what changed; off with Reduce Motion ============ */
 const MOTION=(()=>{try{return !matchMedia('(prefers-reduced-motion: reduce)').matches&&!navigator.webdriver}catch(e){return false}})(); // automated test browsers get the still version
 if(MOTION)document.documentElement.classList.add('motion');
-const Mo={route:'',vVal:null,vBg:'',first:true,obs:null};
+const Mo={route:'',vVal:null,vBg:'',first:true,obs:null,anim:false,animAt:0,animR:'',countAt:0};
 const NAVORD=['home','pay','money','plan','manage'];
 function countTo(el,from,to,ms){
   if(!MOTION||!el||from===to)return;
@@ -2959,14 +2966,15 @@ function afterRender(r){
   // status block: count up the first time, roll + colour morph when it changes
   const v=$('.verdict .vbig'),vb=$('.verdict');
   if(v&&vb){const val=numOf(v.textContent),bg=getComputedStyle(vb).backgroundColor;
-    if(Mo.vVal==null){if(Mo.first){countTo(v,0,val,750);vb.classList.add('fuse')}}
-    else if(val!==Mo.vVal){countTo(v,Mo.vVal,val,600);if(MOTION&&Mo.vBg&&Mo.vBg!==bg){vb.style.transition='none';vb.style.backgroundColor=Mo.vBg;void vb.offsetWidth;vb.style.transition='background-color .5s';vb.style.backgroundColor='';setTimeout(()=>{vb.style.transition=''},600)}}
-    else if(newRoute&&MOTION)vb.classList.add('fuse');
+    const cont=Mo.countAt&&performance.now()-Mo.countAt<1000;
+    if(Mo.anim&&(!Mo.countAt||cont)){if(!Mo.countAt)Mo.countAt=performance.now();countTo(v,0,val,750);vb.classList.add('fuse')}
+    else if(Mo.anim)vb.classList.add('fuse');
+    else if(Mo.vVal!=null&&val!==Mo.vVal){countTo(v,Mo.vVal,val,600);if(MOTION&&Mo.vBg&&Mo.vBg!==bg){vb.style.transition='none';vb.style.backgroundColor=Mo.vBg;void vb.offsetWidth;vb.style.transition='background-color .5s';vb.style.backgroundColor='';setTimeout(()=>{vb.style.transition=''},600)}}
     Mo.vVal=val;Mo.vBg=bg}
   // charts draw once per visit to a screen
   const sel='.io,.rings,.cbar,.dfree,.glance,.debt,.wstrip,.bmeter,.lprog,.atiles,.itl';
   if(Mo.obs)Mo.obs.disconnect();
-  if(!MOTION||!newRoute){$$(sel).forEach(e=>e.classList.add('in'))}
+  if(!Mo.anim){$$(sel).forEach(e=>e.classList.add('in'))}
   else{Mo.obs=new IntersectionObserver(es=>es.forEach(en=>{if(en.isIntersecting){en.target.classList.add('in');Mo.obs.unobserve(en.target)}}),{threshold:.2});$$(sel).forEach(e=>Mo.obs.observe(e))}
   Mo.route=r;Mo.first=false;
 }
