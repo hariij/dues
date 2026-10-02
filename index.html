@@ -961,6 +961,10 @@ dialog::backdrop{background:rgba(20,20,20,.55)}
 .ld i{display:block;height:100%;background:var(--mark);border-right:var(--bw) solid var(--edge);transition:width .5s cubic-bezier(.2,.8,.2,1)}
 .motion .ld i{background-image:repeating-linear-gradient(135deg,transparent 0 8px,rgba(0,0,0,.12) 8px 14px);background-size:40px 40px;animation:ldMove .8s linear infinite}
 @keyframes ldMove{to{background-position:40px 0}}
+
+/* money received in parts */
+.rcv-r{align-items:end}
+.rcvp{margin-top:6px}.rcvp .bmeter{max-width:260px}.rcvp small{display:block;font-size:12.5px;color:var(--ink2)}
 </style>
 </head>
 <body>
@@ -1163,8 +1167,13 @@ function describe(ch){
     if(col==='incoming'){
       if(!b){O.push(`Expecting ${a.name} ${money(a.amount||0)}`);continue}if(!a){O.push(`Deleted ${b.name} (money coming in)`);continue}
       const L=[];
+      const bpp=b.parts||[],app=a.parts||[],bpi=new Set(bpp.map(x=>x.id)),api=new Set(app.map(x=>x.id)),addP=app.filter(x=>!bpi.has(x.id)),remP=bpp.filter(x=>!api.has(x.id));
+      addP.forEach(x=>L.push(`Got ${a.name}: ${money(x.amt)}${x.acc&&accN(x.acc)?' into '+accN(x.acc):''}`));
+      remP.forEach(x=>L.push(`Undid ${money(x.amt)} received for ${a.name}`));
+      if(addP.length&&!a.received&&a.type!=='monthly')L.push(`${a.name}: ${money(Math.max(0,(+a.amount||0)-sum(app,x=>+x.amt||0)))} still to come`);
+      if(addP.length||remP.length){}else
       if(!!a.received!==!!b.received)L.push(a.received?`Got ${a.name} ${money(a.recAmt||a.amount||0)}`:`Undid "got it" for ${a.name}`);
-      const br=b.rec||{},ar=a.rec||{};Object.keys(ar).forEach(m=>{if(!br[m])L.push(`Got ${a.name} for ${fmS(m)}: ${money(ar[m].amt||0)}`)});Object.keys(br).forEach(m=>{if(!ar[m])L.push(`Undid "got it" for ${a.name} (${fmS(m)})`)});
+      const br=addP.length||remP.length?(a.rec||{}):(b.rec||{}),ar=a.rec||{};Object.keys(ar).forEach(m=>{if(!br[m])L.push(`Got ${a.name} for ${fmS(m)}: ${money(ar[m].amt||0)}`)});Object.keys(br).forEach(m=>{if(!ar[m])L.push(`Undid "got it" for ${a.name} (${fmS(m)})`)});
       if(!!a.sure!==!!b.sure)L.push(`${a.name}: ${a.sure?'counting on it':'not sure'}`);
       if(a.date!==b.date&&a.date&&!a.received)L.push(`${a.name}: expected ${fd(a.date)}`);
       if((+a.amount||0)!==(+b.amount||0))L.push(`${a.name}: ${money(b.amount||0)} → ${money(a.amount||0)}`);
@@ -1221,7 +1230,7 @@ function activityHTML(){
 }
 
 rebase();
-const APP_VER='2026.10.01 (new look 6)';
+const APP_VER='2026.10.02 (money in parts)';
 /* ============ cloud sync (Firebase free plan, optional) ============ */
 const FB='https://www.gstatic.com/firebasejs/10.12.2/';
 const CLOUDKEY='duesPlanner.cloud',WHOKEY='duesPlanner.who';
@@ -1496,6 +1505,33 @@ function heat(x){
 }
 
 /* ============ cash timeline ============ */
+/* money can arrive in parts: each receipt is a part with its own amount, date and account */
+function partsOf(f,m){
+  const mo=f.type==='monthly',P=(f.parts||[]).filter(p=>mo?p.m===m:true);
+  if(P.length)return P;
+  if(mo){const r=f.rec&&f.rec[m];return r?[{id:'_l',amt:r.amt,date:r.date,acc:r.acc,at:r.at,added:r.added,m,legacy:1}]:[]}
+  return f.received?[{id:'_l',amt:f.recAmt,date:f.recOn,acc:f.recAcc,at:f.recAt,added:f.recAdded,legacy:1}]:[];
+}
+const incDone=(f,m)=>f.type==='monthly'?!!(f.rec&&f.rec[m]):!!f.received;
+const gotOf=(f,m)=>sum(partsOf(f,m),p=>+p.amt||0);
+const leftOf=(f,m)=>incDone(f,m)?0:Math.max(0,r2((+f.amount||0)-gotOf(f,m)));
+function allParts(f){
+  const out=[];
+  if(f.type==='monthly'){const ms=new Set(Object.keys(f.rec||{}));(f.parts||[]).forEach(p=>ms.add(p.m));ms.forEach(m=>partsOf(f,m).forEach(p=>out.push({f,m,p})))}
+  else partsOf(f).forEach(p=>out.push({f,m:'',p}));
+  return out;
+}
+function recvApply(f,m,rows,date,add,closeShort,restDate){ // record one or more receipts; finish the entry when all of it has come
+  const mo=f.type==='monthly';let last=null,tot=0;f.parts=f.parts||[];
+  rows.forEach(rw=>{const a=acct(rw.acc),pt={id:uid(),amt:r2(rw.amt),date,acc:a?a.id:'',at:Date.now(),added:!!add};if(mo)pt.m=m;f.parts.push(pt);last=pt;tot=r2(tot+pt.amt);if(a&&add)a.balance=r2((+a.balance||0)+pt.amt)});
+  const got=gotOf(f,m),done=!!closeShort||got>=(+f.amount||0)-0.005;
+  if(done){
+    if(mo){f.rec=f.rec||{};f.rec[m]={amt:got,date,acc:last.acc,at:last.at,added:!!add}}
+    else{f.received=true;f.recAmt=got;f.recOn=date;f.recAcc=last.acc;f.recAt=last.at;f.recAdded=!!add;
+      if(f.type==='cardcash'&&Math.abs(got-(+f.amount||0))>0.005){f.amount=got;cashSet(f)}} // repay what was actually drawn
+  }else if(!mo&&restDate)f.date=restDate;
+  return{tot,got,done,left:done?0:r2((+f.amount||0)-got)};
+}
 function incOcc(untilD){ // expected money not yet received, up to a date (one entry per arrival)
   const out=[];
   S.incoming.forEach(f=>{
@@ -1504,12 +1540,14 @@ function incOcc(untilD){ // expected money not yet received, up to a date (one e
       const st=f.from&&f.from>CUR?f.from:CUR;
       for(let m=st;`${m}-01`<=untilD;m=addMonths(m,1)){
         if(f.rec&&f.rec[m])continue;
+        const lf=leftOf(f,m);if(!(lf>0))continue;
         let d=`${m}-${pad(Math.min(f.day||1,daysIn(m)))}`;const late=d<TODAY;if(late)d=TODAY;
-        if(d<=untilD)out.push({f,m,d,amt,late,key:f.id+'|'+m});
+        if(d<=untilD)out.push({f,m,d,amt:lf,late,key:f.id+'|'+m});
       }
     }else if(!f.received){
+      const lf=leftOf(f);if(!(lf>0))return;
       let d=f.date||TODAY;const late=d<TODAY;if(late)d=TODAY;
-      if(d<=untilD)out.push({f,m:monthOf(d),d,amt,late,key:f.id});
+      if(d<=untilD)out.push({f,m:monthOf(d),d,amt:lf,late,key:f.id});
     }
   });
   return out.sort((a,b)=>a.d<b.d?-1:a.d>b.d?1:a.f.name.localeCompare(b.f.name));
@@ -1523,8 +1561,8 @@ function timeline(untilD,use){
   for(let m=S.startMonth;m<=addMonths(monthOf(untilD),1);m=addMonths(m,1)){
     monthList(m).forEach(x=>{
       if(x.rem<=0)return;
-      if(x.cash&&x.o.cashInc){const lf=inc(x.o.cashInc);if(lf&&!lf.received&&!use({f:lf,key:lf.id,d:lf.date,amt:+lf.amount||0})){ // no card cash, no repayment
-        const rr=Math.max(0,r2(x.rem-x.cash));if(rr<=0)return;x=Object.assign({},x,{rem:rr})}}
+      if(x.cash&&x.o.cashInc){const lf=inc(x.o.cashInc);if(lf&&!lf.received&&!use({f:lf,key:lf.id,d:lf.date,amt:leftOf(lf)})){ // cash not counted: no repayment for the part not drawn yet
+        const drop=Math.min(x.cash,r2(leftOf(lf)*(1+(+lf.fee||0)/100))),rr=Math.max(0,r2(x.rem-drop));if(rr<=0)return;x=Object.assign({},x,{rem:rr})}}
       if(x.due){ev.push({d:x.due<TODAY?TODAY:x.due,a:-x.rem,lab:x.it.name,x,late:x.due<TODAY});return}
       let pts=[1,8,15,22].map(d=>`${m}-${pad(d)}`).filter(d=>d>=TODAY);
       if(x.bud&&TODAY>=`${m}-01`){pts=[];for(let d=TODAY;d<=lastDay(m);d=addDays(d,7))pts.push(d)} // what is left of a budget, spread week by week from today
@@ -1712,7 +1750,7 @@ function moneyCard(ctx){
   const end=showNext?B.en:preEnd,occ=incOcc(end).slice(0,4);
   if(occ.length){
     h+=`<div class="mc-sub">Money you are counting on</div>`;
-    h+=occ.map(o=>`<div class="mc-r"><div class="mc-l"><b>${esc(o.f.name)} <span>${money(o.amt)}</span></b><small>${o.late?`<span class="flag crit">! Expected ${fd(o.f.type==='monthly'?`${o.m}-${pad(o.f.day||1)}`:o.f.date)}, not marked yet</span>`:`expected ${fdw(o.d)}`} \u00B7 into ${esc((acct(o.f.account)||{}).name||'account')}</small></div>
+    h+=occ.map(o=>`<div class="mc-r"><div class="mc-l"><b>${esc(o.f.name)} <span>${money(o.amt)}</span></b><small>${gotOf(o.f,o.m)>0?`${money(gotOf(o.f,o.m))} of ${money(o.f.amount)} already received · `:''}${o.late?`<span class="flag crit">! Expected ${fd(o.f.type==='monthly'?`${o.m}-${pad(o.f.day||1)}`:o.f.date)}, not marked yet</span>`:`expected ${fdw(o.d)}`} \u00B7 into ${esc((acct(o.f.account)||{}).name||'account')}</small></div>
       <div class="mc-a"><div class="seg" role="group" aria-label="Counting on ${esc(o.f.name)}?"><button data-act="count" data-id="${o.f.id}" data-v="1" aria-pressed="${!!o.f.sure}">Yes</button><button data-act="count" data-id="${o.f.id}" data-v="0" aria-pressed="${!o.f.sure}">Not sure</button></div>
       <button class="btn sm primary" data-act="recv" data-id="${o.f.id}" data-m="${o.m}" title="The money has arrived">Got it</button></div></div>`).join('');
     const need=x=>showNext?x.total:x.shortPre,first=x=>showNext?(x.stPre[0]||x.sched[0]):x.stPre[0],base=need(sc);
@@ -1912,9 +1950,9 @@ function incTimeline(pend){
   if(!pend.length)return '';
   const end=[bundleOf(VM<CUR?CUR:VM).en,...pend.map(p=>p.n.d)].sort().pop(),span=Math.max(1,between(TODAY,end));
   const pos=d=>Math.max(0,Math.min(100,between(TODAY,d<TODAY?TODAY:d)/span*100));
-  const mx=Math.max(...pend.map(p=>+p.f.amount||0),1);
+  const lft=(f,n)=>leftOf(f,n.m)||+f.amount||0,mx=Math.max(...pend.map(p=>lft(p.f,p.n)),1);
   return `<div class="itl"><div class="itl-line"></div><span class="itl-t" style="left:0">Today</span><span class="itl-t" style="left:100%;transform:translateX(-100%)">${fd(end)}</span>
-    ${pend.map(({f,n},i)=>`<button class="itl-m${f.sure?'':' maybe'}${n.d<TODAY?' late':''}" style="left:${pos(n.d)}%;--s:${14+Math.sqrt((+f.amount||0)/mx)*20}px;--row:${i%2}" data-act="editInc" data-id="${f.id}" title="${esc(f.name)} ${esc(money(f.amount))}, ${esc(fd(n.d))}"><span>${esc(kShort(+f.amount||0))}</span></button>`).join('')}</div>`;
+    ${pend.map(({f,n},i)=>`<button class="itl-m${f.sure?'':' maybe'}${n.d<TODAY?' late':''}" style="left:${pos(n.d)}%;--s:${14+Math.sqrt(lft(f,n)/mx)*20}px;--row:${i%2}" data-act="editInc" data-id="${f.id}" title="${esc(f.name)} ${esc(money(lft(f,n)))}, ${esc(fd(n.d))}"><span>${esc(kShort(lft(f,n)))}</span></button>`).join('')}</div>`;
 }
 function whatIf(f){
   const ctx=planCtx();if(!ctx.sc)return '';const sc=ctx.sc,end=ctx.showNext?ctx.B.en:ctx.preEnd;
@@ -1938,14 +1976,18 @@ function rMoney(){
     const late=n.d<TODAY;
     const meta=[f.type==='monthly'?`every month on the ${ord(f.day||1)}`:f.type==='cardcash'?`card cash, repay ${money(f.amount*(1+(+f.fee||0)/100))} by ${f.repay?fd(f.repay):'?'}`:'',
       `into ${esc((acct(f.account)||{}).name||'no account')}`].filter(Boolean).join(', ');
+    const got=gotOf(f,n.m),left=leftOf(f,n.m),np=partsOf(f,n.m).length;
     return `<div class="incrow"><div class="dt"><b>${parse(n.d).getDate()}</b><span>${mon(n.d)}</span></div>
-      <div class="nm"><div class="a"><button class="lnk plain" data-act="editInc" data-id="${f.id}">${esc(f.name)}</button> <b class="num">${money(f.amount)}</b></div><div class="b">${late?'<span class="flag crit">! Late</span> ':''}${meta}</div>${whatIf(f)}</div>
+      <div class="nm"><div class="a"><button class="lnk plain" data-act="editInc" data-id="${f.id}">${esc(f.name)}</button> <b class="num">${money(got>0?left:f.amount)}</b>${got>0?` <span class="muted small">left of ${money(f.amount)}</span>`:''}</div><div class="b">${late?'<span class="flag crit">! Late</span> ':''}${meta}</div>
+      ${got>0?`<div class="rcvp"><span class="bmeter"><i style="width:${Math.min(100,got/(+f.amount||1)*100)}%"></i></span><small>${money(got)} received so far${np>1?` in ${np} parts`:''}. Tap Got it when more comes.</small></div>`:''}${whatIf(f)}</div>
       <div class="acts"><div class="seg mini" role="group" aria-label="Counting on ${esc(f.name)}?"><button data-act="count" data-id="${f.id}" data-v="1" aria-pressed="${!!f.sure}">Yes</button><button data-act="count" data-id="${f.id}" data-v="0" aria-pressed="${!f.sure}">Not sure</button></div><button class="btn sm primary" data-act="recv" data-id="${f.id}" data-m="${n.m}">Got it</button></div></div>`}).join('')
    :'<div class="empty">Nothing expected. Add salary, a payment you are owed, or cash you will draw from a card.</div>';
-  h+='</div><p class="note">Tap a name to change its amount, date or account. "Got it" adds the money to the account.</p>';
-  const got=[];S.incoming.forEach(f=>{if(f.type==='monthly'){Object.keys(f.rec||{}).forEach(m=>got.push({f,m,r:f.rec[m]}))}else if(f.received)got.push({f,r:{amt:f.recAmt,date:f.recOn,acc:f.recAcc}})});
-  got.sort((a,b)=>(b.r.date||'')<(a.r.date||'')?-1:1);
-  if(got.length)h+=`<details class="paidfold card" style="padding:0;margin-top:14px"><summary>✓ Received (${got.length})</summary>${got.slice(0,10).map(g=>`<div class="mrow done"><div class="ico">✓</div><div class="nm"><div class="a">${esc(g.f.name)}</div><div class="b">${fd(g.r.date)}, into ${esc((acct(g.r.acc)||{}).name||'account')}</div></div><div class="rt"><div class="amt">${money(g.r.amt)}</div></div><div class="acts"><button class="btn sm ghost" data-act="unrecv" data-id="${g.f.id}" data-m="${g.m||''}">Undo</button>${g.f.type==='monthly'?'':`<button class="btn sm ghost" data-act="again" data-id="${g.f.id}">Expect again</button>`}</div></div>`).join('')}</details>`;
+  h+='</div><p class="note">Tap a name to change its amount, date or account. "Got it" adds the money to the account. It can come in parts: enter each part as it arrives, into whichever account it went.</p>';
+  const got=[];S.incoming.forEach(f=>allParts(f).forEach(x=>got.push(x)));
+  got.sort((a,b)=>(a.p.date||'')>(b.p.date||'')?-1:(a.p.date||'')<(b.p.date||'')?1:(b.p.at||0)-(a.p.at||0));
+  const seen=new Set();
+  if(got.length)h+=`<details class="paidfold card" style="padding:0;margin-top:14px"><summary>✓ Received (${got.length})</summary>${got.slice(0,15).map(({f,m,p})=>{const done=incDone(f,m),first=!seen.has(f.id);seen.add(f.id);
+    return `<div class="mrow done"><div class="ico">✓</div><div class="nm"><div class="a">${esc(f.name)}${done?'':' <span class="est">Part</span>'}</div><div class="b">${p.date?fd(p.date):''}, into ${esc((acct(p.acc)||{}).name||'account')}${p.added===false?', balance not changed':''}</div></div><div class="rt"><div class="amt">${money(p.amt)}</div></div><div class="acts"><button class="btn sm ghost" data-act="unrecv" data-id="${f.id}" data-m="${m||''}" data-p="${p.id}">Undo</button>${f.type==='monthly'||!done||!first?'':`<button class="btn sm ghost" data-act="again" data-id="${f.id}">Expect again</button>`}</div></div>`}).join('')}</details>`;
   view.innerHTML=h;
 }
 /* Plan: EMIs over time and debt-free countdown */
@@ -2198,8 +2240,7 @@ function reconcile(accIds,change){ // change = new total minus old total for the
   b+=`<p class="hint" id="recTot">Ticked ${money(0)} of the ${money(amt)} ${down?'drop':'rise'}.</p>`;
   const f=openDlg(down?'Did you already pay any of these?':'Did this money already arrive?',b,`<button type="button" class="btn" data-close>${down?'Not paid yet':'Not yet'}</button><button class="btn primary">${down?'Mark as paid':'Mark as received'}</button>`,fdata=>{
     let n=0;
-    arr.forEach((o,i)=>{if(!fdata.get('in_'+i))return;n++;const rr={amt:o.amt,date:TODAY,acc:o.f.account,at:Date.now(),added:false};
-      if(o.f.type==='monthly'){o.f.rec=o.f.rec||{};o.f.rec[o.m]=rr}else{o.f.received=true;o.f.recAmt=o.amt;o.f.recOn=TODAY;o.f.recAcc=o.f.account;o.f.recAt=rr.at;o.f.recAdded=false}});
+    arr.forEach((o,i)=>{if(!fdata.get('in_'+i))return;n++;recvApply(o.f,o.m,[{amt:o.amt,acc:o.f.account}],TODAY,false,false,'')});
     bills.forEach((x,i)=>{if(!fdata.get('bill_'+i))return;n++;const o=ov(x.m,x.it.id,true);o.pays=o.pays||[];o.pays.push({id:uid(),date:TODAY,amount:x.rem,acc:'',note:'Already in bank balance',at:Date.now()});if(x.it.mode==='used')o.on=true});
     if(n)setTimeout(()=>toast(`${n} item${n>1?'s':''} marked, balance unchanged`,()=>restore(j0)),0);
   });
@@ -2470,6 +2511,7 @@ function incForm(id,copy){
   let b=fld('What kind?',seg('type',[['once','One-time'],['monthly','Every month'],['cardcash','Cash from a card']],f0.type||'once'));
   b+=fld('Name',`<input name="name" required value="${esc(f0.name||'')}" placeholder="e.g. Salary, client payment" autocomplete="off">`);
   b+=`<div class="g2">${fld('Amount you will receive',money$('amount',f0.amount,1))}${fld('Goes into',`<select name="account">${S.accounts.map(a=>`<option value="${a.id}" ${a.id===f0.account?'selected':''}>${esc(a.name)}</option>`).join('')}</select>`)}</div>`;
+  if(!isNew&&f0.type!=='monthly'&&gotOf(f0)>0&&!f0.received)b+=`<p class="hint">${money(gotOf(f0))} of this has already been received. The amount above is the full amount, including that.</p>`;
   b+=`<div data-show="type=once|cardcash">${fld('Expected on',`<input type="date" name="date" value="${f0.date||''}" required>`)}</div>`;
   b+=`<div data-show="type=monthly"><div class="g2">${fld('Day of the month',`<input type="text" inputmode="numeric" name="day" min="1" max="31" value="${f0.day||1}" required>`)}${fld('Starting',`<input type="month" name="from" value="${f0.from||VM}">`)}</div></div>`;
   b+=`<label class="chk"><input type="checkbox" name="count" ${f0.sure===false?'':'checked'}><span>I am counting on this money<br><span class="small muted">Untick if you are not sure it will come. Home shows what happens either way.</span></span></label>`;
@@ -2478,6 +2520,8 @@ function incForm(id,copy){
   const f=openDlg(isNew?'Money coming in':`Edit ${esc(f0.name)}`,b,
     `${!isNew?`<button type="button" class="btn danger" data-act="delInc" data-id="${id}" style="margin-right:auto">Delete</button>`:''}<button type="button" class="btn" data-close>Cancel</button><button class="btn primary">${isNew?'Add':'Save'}</button>`,
     fdata=>{
+      if(fdata.get('type')==='cardcash'){const pl=cashPlace({card:fdata.get('card'),repay:fdata.get('repay')}),clash=pl&&S.incoming.find(x=>x!==f0&&x.cashAt&&x.cashAt.card===pl.card&&x.cashAt.m===pl.m);
+        if(clash){note(`<b>${esc(clash.name)}</b> is already card cash on this card for the same bill. Open that entry and change its amount instead. You can receive it in parts.`);return false}}
       const o=isNew?{id:uid()}:f0;
       o.type=fdata.get('type');o.name=fdata.get('name').trim();o.amount=num(fdata.get('amount'));o.account=fdata.get('account');
       if(o.type==='monthly'){o.day=Math.min(31,Math.max(1,parseInt(fdata.get('day'))||1));o.from=fdata.get('from')||CUR;o.rec=o.rec||{}}
@@ -2487,6 +2531,7 @@ function incForm(id,copy){
         o.card=fdata.get('card');o.fee=num(fdata.get('fee'));o.repay=fdata.get('repay');
         cashSet(o);
       }else cashClear(o);
+      if(!isNew&&o.type!=='monthly'&&!o.received&&(o.parts||[]).length){const g=gotOf(o);if(g>=o.amount-0.005){const lp=o.parts[o.parts.length-1];o.received=true;o.recAmt=g;o.recOn=lp.date;o.recAcc=lp.acc;o.recAt=lp.at;o.recAdded=lp.added}}
       if(isNew)S.incoming.push(o);
     });
   wireShow(f);
@@ -2521,19 +2566,37 @@ function cashSet(f){
   f.cashAt=p;
 }
 function openRecv(id,m){
-  const f=inc(id),j0=snap(),exp=f.type==='monthly'?`${m}-${pad(Math.min(f.day||1,daysIn(m)))}`:(f.date||TODAY);
+  const f=inc(id),j0=snap(),mo=f.type==='monthly',exp=mo?`${m}-${pad(Math.min(f.day||1,daysIn(m)))}`:(f.date||TODAY);
   const a0=acct(f.account)||S.accounts[0],already=a0&&a0.updated&&a0.updated>exp;
-  const f2=openDlg(`Got it: ${esc(f.name)}`,`<div class="g2">${fld('Amount received',money$('amt',f.amount,1))}${fld('Date',`<input type="date" name="date" value="${TODAY}" required>`)}</div>
-    ${fld('Into',`<select name="acc">${S.accounts.map(a=>`<option value="${a.id}" ${a0&&a.id===a0.id?'selected':''}>${esc(a.name)} (${money(a.balance)})</option>`).join('')}</select>`)}
-    ${fld('Your balance',seg('mode',[['add','Add it to the balance'],['in','Balance already includes it']],already?'in':'add'))}
-    <p class="hint" id="rcvHint"></p>${f.type==='cardcash'?`<p class="note">The ${esc((item(f.card)||{}).name||'card')} repayment stays ${money((+f.amount||0)*(1+(+f.fee||0)/100))}. If you drew a different amount, edit this entry on the Money screen.</p>`:''}`,
+  const got=gotOf(f,m),left=leftOf(f,m),N=Math.max(1,Math.min(4,S.accounts.length)),others=S.accounts.filter(a=>a!==a0);
+  const cardN=esc((item(f.card)||{}).name||'card'),fee=1+(+f.fee||0)/100;
+  const accSel=(i,sel)=>`<select name="acc_${i}" aria-label="Account">${S.accounts.map(a=>`<option value="${a.id}" ${sel&&a.id===sel.id?'selected':''}>${esc(a.name)} (${money(a.balance)})</option>`).join('')}</select>`;
+  let rows='';for(let i=0;i<N;i++)rows+=`<div class="g2 rcv-r" data-row="${i}" ${i?'hidden':''}>${fld(i?'Another part':'Amount received now',`<input name="amt_${i}" type="text" inputmode="decimal" value="${i?'':left}" ${i?'':'required'}>`)}${fld('Into',accSel(i,i?(others[i-1]||a0):a0))}</div>`;
+  const f2=openDlg(`Got it: ${esc(f.name)}`,
+    (got>0?`<div class="sumbox"><div><span class="muted small">Received so far</span><span class="big">${money(got)}</span><span class="muted small">of ${money(f.amount)}. ${money(left)} still to come.</span></div></div>`
+          :`<p class="muted" style="margin-top:0">You expect ${money(f.amount)}. If only part of it has come, type that part. The rest stays expected.</p>`)+
+    rows+(N>1?`<p style="margin:8px 0 0"><button type="button" class="lnk" id="rcvSplit">+ Part of it went into another account</button></p>`:'')+
+    fld('Date received',`<input type="date" name="date" value="${TODAY}" required>`)+
+    fld('Your balance',seg('mode',[['add','Add it to the balance'],['in','Balance already includes it']],already?'in':'add'))+
+    `<div id="rcvRest" hidden>${fld('The rest',seg('rest',[['wait','Still coming'],['done','That is all I will get']],'wait'))}${mo?'':`<div id="rcvRestD">${fld('Expect the rest on',`<input type="date" name="restdate" value="${f.date&&f.date>TODAY?f.date:''}">`,'Leave empty if you do not know yet.')}</div>`}</div>
+    <p class="hint" id="rcvHint"></p>`,
    `<button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button>`,
-   fdata=>{const amt=num(fdata.get('amt')),a=acct(fdata.get('acc')),add=fdata.get('mode')==='add',rr={amt,date:fdata.get('date'),acc:a?a.id:'',at:Date.now(),added:add};
-     if(a&&amt&&add)a.balance=r2((+a.balance||0)+amt);
-     setTimeout(()=>floatText('+'+money(amt),true),60);
-     if(f.type==='monthly'){f.rec=f.rec||{};f.rec[m]=rr}else{f.received=true;f.recAmt=amt;f.recOn=rr.date;f.recAcc=rr.acc;f.recAt=rr.at;f.recAdded=add}
-     setTimeout(()=>toast(add?`${money(amt)} added to ${a?esc(a.name):'your account'}`:`Marked as received. ${a?esc(a.name):'Balance'} unchanged.`,()=>restore(j0)),0)});
-  const hint=()=>{const a=acct(f2.acc.value),add=f2.mode.value==='add';$('#rcvHint').innerHTML=a?(add?`${esc(a.name)}: ${money(a.balance)} → <b>${money((+a.balance||0)+num(f2.amt.value))}</b>. Choose "already includes it" if you typed the balance after the money came in (last typed ${timeTxt(a)}).`:`${esc(a.name)} stays ${money(a.balance)}. Right if the balance you typed on ${timeTxt(a)} already shows this money.`):''};
+   fdata=>{const R=[];for(let i=0;i<N;i++){if(f2.querySelector(`[data-row="${i}"]`).hidden)continue;const v=r2(num(fdata.get('amt_'+i)));if(v>0)R.push({amt:v,acc:fdata.get('acc_'+i)})}
+     if(!R.length){f2.amt_0.focus();return false}
+     const add=fdata.get('mode')==='add',tot=r2(sum(R,x=>x.amt)),short=tot<left-0.005;
+     const res=recvApply(f,m,R,fdata.get('date'),add,short&&fdata.get('rest')==='done',short?(fdata.get('restdate')||''):'');
+     setTimeout(()=>floatText('+'+money(tot),true),60);
+     const names=[...new Set(R.map(x=>(acct(x.acc)||{}).name).filter(Boolean))].map(esc).join(' and ');
+     setTimeout(()=>toast(`${add?`${money(tot)} added to ${names||'your account'}`:`${money(tot)} marked as received, balances unchanged`}${res.done?'':`. ${money(res.left)} still to come`}`,()=>restore(j0)),0)});
+  const hint=()=>{const add=f2.mode.value==='add',per={};let tot=0;
+    for(let i=0;i<N;i++){if(f2.querySelector(`[data-row="${i}"]`).hidden)continue;const v=num(f2['amt_'+i].value);if(!(v>0))continue;tot=r2(tot+v);const k=f2['acc_'+i].value;per[k]=r2((per[k]||0)+v)}
+    const short=tot>0&&tot<left-0.005,wait=f2.rest.value==='wait';$('#rcvRest').hidden=!short;const rd=$('#rcvRestD');if(rd)rd.hidden=!wait;
+    const L=Object.keys(per).map(k=>{const a=acct(k);return a?(add?`${esc(a.name)}: ${money(a.balance)} → <b>${money(r2((+a.balance||0)+per[k]))}</b>`:`${esc(a.name)} stays ${money(a.balance)}`):''}).filter(Boolean);
+    if(add&&L.length)L.push('Choose "already includes it" if you typed the balance after the money came in.');
+    if(short)L.push(wait?`<b>${money(r2(left-tot))}</b> stays expected.`:`Nothing more is expected.${f.type==='cardcash'?` The ${cardN} repayment becomes <b>${money(r2((got+tot)*fee))}</b>, for what you actually drew.`:''}`);
+    else if(tot>0&&f.type==='cardcash')L.push(tot>left+0.005?`That is more than expected, so the ${cardN} repayment becomes <b>${money(r2((got+tot)*fee))}</b>.`:`The ${cardN} repayment stays ${money(r2((+f.amount||0)*fee))}.`);
+    $('#rcvHint').innerHTML=L.join('<br>')};
+  const sp=$('#rcvSplit');if(sp)sp.addEventListener('click',()=>{const nx=f2.querySelector('.rcv-r[hidden]');if(nx){nx.hidden=false;const i0=f2.amt_0;if(nx.dataset.row==='1'&&num(i0.value)>=left-0.005)i0.select();nx.querySelector('input').focus()}if(!f2.querySelector('.rcv-r[hidden]'))sp.hidden=true;hint()});
   f2.addEventListener('input',hint);f2.addEventListener('change',hint);hint();
 }
 
@@ -2767,7 +2830,7 @@ function rManage(){
   const fresh=a=>{const d=a.updated?between(a.updated,TODAY):99;return `<span class="fresh" style="--p:${Math.max(0,100-d*14)}%" title="updated ${a.updated?fd(a.updated):'never'}"><i></i></span><small>${a.updated?(d===0?'updated today':d===1?'updated yesterday':`updated ${d} days ago`):'enter the balance'}</small>`};
   h+=`<section class="grp msec" id="ms-acc">${head('<span class="ico sm">\u{1F3E6}</span>','Bank accounts',S.accounts.length,`<button class="btn sm" data-act="addAcc">+ Add</button>`)}<div class="list">${S.accounts.map(a=>`<div class="mrow3" data-name="${esc(a.name.toLowerCase())}"><div class="mn"><button class="lnk plain" data-act="editAcc" data-id="${a.id}">${esc(a.name)}</button>${fresh(a)}</div><div class="mv">${vchip('bal',a.id,`<b class="${(+a.balance||0)<0?'neg':''}">${money(a.balance)}</b>`,a.balance,`${a.name} balance ${money(a.balance)}`)}</div><button class="btn sm ghost rmb" data-act="editAcc" data-id="${a.id}" aria-label="More for ${esc(a.name)}">⋯</button></div>`).join('')||'<div class="empty">No accounts yet.</div>'}</div></section>`;
   const inc=S.incoming.filter(f=>f.type==='monthly'||!f.received);
-  h+=`<section class="grp msec" id="ms-inc">${head('<span class="ico sm">\u{1F4B0}</span>','Money coming in',inc.length,`<button class="btn sm" data-act="addInc">+ Add</button>`)}<div class="list">${inc.map(f=>`<div class="mrow3" data-name="${esc(f.name.toLowerCase())}"><div class="mn"><button class="lnk plain" data-act="editInc" data-id="${f.id}">${esc(f.name)}</button><small>${f.type==='monthly'?`every month on the ${ord(f.day||1)}`:f.date?`expected ${fdw(f.date)}`:''}${f.type==='cardcash'&&f.repay?`, repay by ${fd(f.repay)}`:''}</small></div><div class="mv"><span class="vfix">${money(f.amount)}</span><div class="seg mini" role="group" aria-label="Counting on ${esc(f.name)}?"><button data-act="count" data-id="${f.id}" data-v="1" aria-pressed="${!!f.sure}">Yes</button><button data-act="count" data-id="${f.id}" data-v="0" aria-pressed="${!f.sure}">Not sure</button></div></div><button class="btn sm ghost rmb" data-act="editInc" data-id="${f.id}" aria-label="Edit ${esc(f.name)}">⋯</button></div>`).join('')||'<div class="empty">Nothing expected.</div>'}</div></section>`;
+  h+=`<section class="grp msec" id="ms-inc">${head('<span class="ico sm">\u{1F4B0}</span>','Money coming in',inc.length,`<button class="btn sm" data-act="addInc">+ Add</button>`)}<div class="list">${inc.map(f=>`<div class="mrow3" data-name="${esc(f.name.toLowerCase())}"><div class="mn"><button class="lnk plain" data-act="editInc" data-id="${f.id}">${esc(f.name)}</button><small>${f.type==='monthly'?`every month on the ${ord(f.day||1)}`:f.date?`expected ${fdw(f.date)}`:''}${f.type==='cardcash'&&f.repay?`, repay by ${fd(f.repay)}`:''}</small></div><div class="mv"><span class="vfix">${money(f.type==='monthly'?f.amount:leftOf(f))}${f.type!=='monthly'&&gotOf(f)>0?` <small class="muted">left of ${money(f.amount)}</small>`:''}</span><div class="seg mini" role="group" aria-label="Counting on ${esc(f.name)}?"><button data-act="count" data-id="${f.id}" data-v="1" aria-pressed="${!!f.sure}">Yes</button><button data-act="count" data-id="${f.id}" data-v="0" aria-pressed="${!f.sure}">Not sure</button></div></div><button class="btn sm ghost rmb" data-act="editInc" data-id="${f.id}" aria-label="Edit ${esc(f.name)}">⋯</button></div>`).join('')||'<div class="empty">Nothing expected.</div>'}</div></section>`;
   const ppl=S.owners.filter(o=>o!=='Me');
   h+=`<section class="grp msec" id="ms-ppl">${head('<span class="ico sm">\u{1F464}</span>','People whose cards you use',ppl.length,`<button class="btn sm" data-act="ownerNew">+ Add</button>`)}<div class="list">${ppl.map(o=>{const n=S.items.filter(i=>i.owner===o).length;return `<div class="mrow3" data-name="${esc(o.toLowerCase())}"><div class="mn"><b>${esc(o)}</b><small>${n?`${n} card${n>1?'s':''}: ${esc(S.items.filter(i=>i.owner===o).map(i=>i.name).join(', '))}`:'no cards yet'}</small></div><div class="mv"><button class="btn sm ghost" data-act="ownerRename" data-e="${esc(o)}">Rename</button></div>${n?'<span></span>':`<button class="btn sm ghost rmb danger" data-act="delOwner" data-e="${esc(o)}" aria-label="Remove ${esc(o)}" title="Remove">×</button>`}</div>`}).join('')||'<div class="empty">Nobody yet.</div>'}</div></section>`;
   view.innerHTML=h;
@@ -2798,10 +2861,7 @@ function monthData(M){
     if(x.due){if(x.due>=st&&x.due<=en)(byD[x.due]=byD[x.due]||[]).push(x)}else if(m===M)any.push(x)});
   // money in: expected (not yet received) and received
   if(en>=TODAY)incOcc(en).forEach(o=>{if(o.d>=st)(inc[o.d]=inc[o.d]||[]).push({name:o.f.name,amt:o.amt,exp:1,sure:!!o.f.sure,late:o.late,f:o.f,m:o.m})});
-  S.incoming.forEach(f=>{
-    if(f.type==='monthly')Object.keys(f.rec||{}).forEach(m=>{const r=f.rec[m];if(r.date>=st&&r.date<=en)(inc[r.date]=inc[r.date]||[]).push({name:f.name,amt:r.amt,got:1})});
-    else if(f.received&&f.recOn>=st&&f.recOn<=en)(inc[f.recOn]=inc[f.recOn]||[]).push({name:f.name,amt:f.recAmt,got:1});
-  });
+  S.incoming.forEach(f=>allParts(f).forEach(({p:pt})=>{if(pt.date&&pt.date>=st&&pt.date<=en)(inc[pt.date]=inc[pt.date]||[]).push({name:f.name,amt:pt.amt,got:1})}));
   let bal={};if(en>=TODAY&&M>=CUR){const tl=timeline(en,planned);if(tl)tl.days.forEach(d=>bal[d.d]=d.bal)}
   Object.values(byD).forEach(L=>L.sort((a,b)=>b.rem-a.rem||a.it.name.localeCompare(b.it.name)));
   return{st,en,byD,any,inc,bal};
@@ -3082,11 +3142,16 @@ document.addEventListener('click',e=>{
     case 'editInc':incForm(id);break;
     case 'delInc':{const f=inc(id);ask(`Delete <b>${esc(f.name)}</b>?${f.cashAt?' The card cash repayment is taken off the card bill too.':''}`,()=>{cashClear(f);S.incoming=S.incoming.filter(x=>x.id!==id);dlg.close();save();render()},{ok:'Delete',danger:1});break}
     case 'recv':openRecv(id,m);break;
-    case 'unrecv':{const f=inc(id);const r0=f.type==='monthly'?f.rec[m]:{amt:f.recAmt,acc:f.recAcc,date:f.recOn,at:f.recAt,added:f.recAdded};
-      const a=r0&&r0.acc&&acct(r0.acc),added=r0&&r0.added!==false;
-      const doIt=out=>{const j0=snap();if(f.type==='monthly')delete f.rec[m];else f.received=false;if(a&&out&&r0.amt)a.balance=r2((+a.balance||0)-r0.amt);save();render();toast(`${esc(f.name)} is expected again${a&&out?`, ${money(r0.amt)} taken out of ${esc(a.name)}`:''}`,()=>restore(j0))};
+    case 'unrecv':{const f=inc(id),mo=f.type==='monthly',P=partsOf(f,m),p=P.find(x=>x.id===b.dataset.p)||P[P.length-1];if(!p)break;
+      const a=p.acc&&acct(p.acc),added=p.added!==false;
+      const doIt=out=>{const j0=snap();
+        if(p.legacy){if(mo)delete f.rec[m];else f.received=false}
+        else{f.parts=(f.parts||[]).filter(x=>x!==p);const g=sum(f.parts.filter(x=>mo?x.m===m:true),x=>+x.amt||0),still=g>0&&g>=(+f.amount||0)-0.005;
+          if(mo){if(still&&f.rec&&f.rec[m])f.rec[m].amt=g;else if(f.rec)delete f.rec[m]}else{f.received=still;if(still)f.recAmt=g}}
+        if(a&&out&&p.amt)a.balance=r2((+a.balance||0)-p.amt);save();render();
+        toast(`${money(p.amt)} of ${esc(f.name)} is expected again${a&&out?`, taken out of ${esc(a.name)}`:''}`,()=>restore(j0))};
       if(!a||!added)doIt(false);
-      else if(typedAfter(a,r0.at,r0.date))choose(`Undo <b>${esc(f.name)}</b>?<br><br>You typed the ${esc(a.name)} balance after this money came in (last on ${timeTxt(a)}), so it may already be right. Take ${money(r0.amt)} out anyway?`,[{label:'Cancel'},{label:'Leave the balance',fn:()=>doIt(false)},{label:`Take ${money(r0.amt)} out`,cls:'primary',fn:()=>doIt(true)}]);
+      else if(typedAfter(a,p.at,p.date))choose(`Undo ${money(p.amt)} of <b>${esc(f.name)}</b>?<br><br>You typed the ${esc(a.name)} balance after this money came in (last on ${timeTxt(a)}), so it may already be right. Take ${money(p.amt)} out anyway?`,[{label:'Cancel'},{label:'Leave the balance',fn:()=>doIt(false)},{label:`Take ${money(p.amt)} out`,cls:'primary',fn:()=>doIt(true)}]);
       else doIt(true);
       break}
     case 'again':{const f=inc(id);incForm(null,{type:'once',name:f.name,amount:f.amount,account:f.account,sure:false});break}
